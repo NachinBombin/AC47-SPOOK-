@@ -80,7 +80,6 @@ function ENT:FlushPendingSounds()
     for _, entry in ipairs(self.pending_sounds) do
         if ct >= entry.sendTime then
             if IsValid(entry.ply) then
-                -- FIX: write entIndex so client can manage ambient loop lifetime.
                 net.Start("ac47_plane_spatial_sound")
                     net.WriteString(entry.soundPath)
                     net.WriteVector(entry.nearPos)
@@ -122,13 +121,10 @@ local PEACEFUL_MAX         = 7
 local WEAPON_WINDOW        = 10
 local SPRAY_SOUND_DELAY    = 1.2
 local SPRAY_PAUSE_DURATION = 0.5
--- Fire a muzzle flash every Nth bullet tick during a burst.
--- BURST_DELAY=0.033 → 30 Hz. Every 4th = ~8 Hz flash rate.
 local MUZZLE_FLASH_EVERY   = 4
 
-local PROP_DEGS_PER_TICK = 36000 * engine.TickInterval()
-local GUN_BARREL_STEP    = 35
-local CTRL_SMOOTH        = 10
+local GUN_BARREL_STEP = 35
+local CTRL_SMOOTH     = 10
 
 -- ============================================================
 -- ENT PROPERTIES
@@ -156,12 +152,15 @@ end
 function ENT:Initialize()
     self.pending_sounds = {}
 
-    self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
-    self.CallDir      = self:GetVar("CallDir",   Vector(1, 0, 0))
-    self.Lifetime     = self:GetVar("Lifetime",  self.Lifetime)
-    self.Speed        = self:GetVar("Speed",     self.Speed)
-    self.OrbitRadius  = self:GetVar("OrbitRadius", self.OrbitRadius)
-    self.SkyHeightAdd = self:GetVar("SkyHeightAdd", self.SkyHeightAdd)
+    -- Direct field assignment: spawner sets these fields on the entity
+    -- table before calling Spawn(). GetVar/SetVar are LFS-only methods
+    -- and do not exist on base_gmodentity.
+    self.CenterPos    = self.CenterPos    or self:GetPos()
+    self.CallDir      = self.CallDir      or Vector(1, 0, 0)
+    self.Lifetime     = self.Lifetime     or ENT.Lifetime
+    self.Speed        = self.Speed        or ENT.Speed
+    self.OrbitRadius  = self.OrbitRadius  or ENT.OrbitRadius
+    self.SkyHeightAdd = self.SkyHeightAdd or ENT.SkyHeightAdd
 
     if self.CallDir:LengthSqr() <= 1 then self.CallDir = Vector(1, 0, 0) end
     self.CallDir.z = 0
@@ -223,8 +222,6 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
-    -- Engine sounds: use EmitSpatialSound so they go through the
-    -- spatial system and are managed client-side by ac47_ambient_loops.
     self:EmitSpatialSound("lfs/tfre_ac47/skytrain_engine_4rpm.wav", self:GetPos(), 125, 100, 1.0)
     self:EmitSpatialSound("lfs/tfre_ac47/skytrain_engine_far.wav",  self:GetPos(), 125, 100, 0.6)
     self:EmitSound("lfs/tfre_ac47/skytrain_engine_start.wav", 125, 100, 1.0)
@@ -300,7 +297,6 @@ end
 function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
-    -- BroadcastDamageTier(0) stops client ambient loops via ac47_plane_damage_tier net.Receive
     self:BroadcastDamageTier(0)
     local pos = self.LastPos or self:GetPos()
     local function boom(p, sc)
@@ -322,9 +318,8 @@ function ENT:DestroyPlane()
 end
 
 function ENT:StopEngineSounds()
-    -- Server-side engine sound handles removed in favour of
-    -- EmitSpatialSound + client ac47_ambient_loops management.
-    -- Nothing to stop here; clients handle it via EntityRemoved hook.
+    -- Engine sounds managed client-side via ac47_ambient_loops.
+    -- Nothing to stop server-side.
 end
 
 -- ============================================================
@@ -361,6 +356,9 @@ function ENT:PhysicsUpdate(phys)
     if CurTime() >= self.DieTime then self:Remove() return end
     local pos = self:GetPos()
     self.LastPos = pos
+    -- Use live tick interval here so prop speed is correct regardless of
+    -- whether the server is 33-tick or 66-tick (captured at file load would
+    -- be wrong if tick rate changes or differs from default).
     local ft = engine.TickInterval()
 
     if CurTime() >= self.AltDriftNextPick then
@@ -401,7 +399,9 @@ function ENT:PhysicsUpdate(phys)
     ))
     phys:SetVelocity(vel)
 
-    self.PropAngle = (self.PropAngle + PROP_DEGS_PER_TICK) % 360
+    -- Prop spin: always at max RPM. Compute degrees-per-tick from live interval.
+    local propDegsPerTick = 36000 * ft
+    self.PropAngle = (self.PropAngle + propDegsPerTick) % 360
     local propAng  = Angle(self.PropAngle, 0, 0)
     self:ManipulateBoneAngles(25, propAng)
     self:ManipulateBoneAngles(26, propAng)
@@ -515,7 +515,6 @@ function ENT:UpdateGunBurst(gunIdx, ct)
             burst.bulletsFired = burst.bulletsFired + 1
             burst.nextTime     = ct + BURST_DELAY
             self:FireGunBullet(gunIdx, burst)
-            -- Per-round muzzle flash at every Nth bullet (8 Hz at 30 Hz fire rate)
             if burst.bulletsFired % MUZZLE_FLASH_EVERY == 0 then
                 self:SpawnGunMuzzleFX(gunIdx)
             end
@@ -538,7 +537,7 @@ function ENT:StartGunBurst(gunIdx, targetPos)
     self.GunBarrelStep[gunIdx] = (self.GunBarrelStep[gunIdx] + GUN_BARREL_STEP) % 360
     self:ManipulateBoneAngles(GUN_BONES[gunIdx], Angle(self.GunBarrelStep[gunIdx], 0, 0))
 
-    self:SpawnGunMuzzleFX(gunIdx)  -- burst-start flash
+    self:SpawnGunMuzzleFX(gunIdx)
     self:EmitSpatialSound(
         M134_FIRE_SOUNDS[math.random(#M134_FIRE_SOUNDS)],
         self.CenterPos, WEAPON_LEVEL, math.random(96, 104), 1.0
@@ -577,7 +576,6 @@ function ENT:UpdateGunSpray(gunIdx, ct)
     if ct < g.NextShotTime   then return end
     g.NextShotTime     = ct + BURST_DELAY
     g.SprayBulletCount = g.SprayBulletCount + 1
-    -- Per-round muzzle flash during spray bursts
     if g.SprayBulletCount % MUZZLE_FLASH_EVERY == 0 then
         self:SpawnGunMuzzleFX(gunIdx)
     end
@@ -617,7 +615,7 @@ function ENT:GetPrimaryTarget()
 end
 
 -- ============================================================
--- MUZZLE FX  (scale 0.2 per user spec)
+-- MUZZLE FX
 -- ============================================================
 
 function ENT:SpawnGunMuzzleFX(gunIdx)
