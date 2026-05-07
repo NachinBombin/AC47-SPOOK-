@@ -28,12 +28,13 @@ util.PrecacheSound("lfs/tfre_ac47/skytrain_engine_far.wav")
 
 util.AddNetworkString("ac47_plane_damage_tier")
 
--- ac47_plane_spatial_sound: declared here, receiver in bullet cl_init.lua.
--- Extra field: entIndex (UInt 16) appended so client can manage loop lifetime.
+-- ac47_plane_spatial_sound: one-shot and loop engine sounds delivered per-
+-- player with propagation delay. Receiver lives in bullet cl_init.lua which
+-- is always loaded before the plane entity is ever seen.
 util.AddNetworkString("ac47_plane_spatial_sound")
 
 -- ============================================================
--- SPATIAL SOUND SYSTEM
+-- SPATIAL SOUND SYSTEM (mirrors EmitSpatialSound in AC-130 init.lua exactly)
 -- ============================================================
 
 local SOUND_SPEED     = 8200
@@ -152,9 +153,6 @@ end
 function ENT:Initialize()
     self.pending_sounds = {}
 
-    -- Direct field assignment: spawner sets these fields on the entity
-    -- table before calling Spawn(). GetVar/SetVar are LFS-only methods
-    -- and do not exist on base_gmodentity.
     self.CenterPos    = self.CenterPos    or self:GetPos()
     self.CallDir      = self.CallDir      or Vector(1, 0, 0)
     self.Lifetime     = self.Lifetime     or ENT.Lifetime
@@ -318,8 +316,8 @@ function ENT:DestroyPlane()
 end
 
 function ENT:StopEngineSounds()
-    -- Engine sounds managed client-side via ac47_ambient_loops.
-    -- Nothing to stop server-side.
+    -- Engine sounds are managed client-side via ac47_ambient_loops.
+    -- The EntityRemoved hook in cl_init.lua cleans them up automatically.
 end
 
 -- ============================================================
@@ -356,9 +354,6 @@ function ENT:PhysicsUpdate(phys)
     if CurTime() >= self.DieTime then self:Remove() return end
     local pos = self:GetPos()
     self.LastPos = pos
-    -- Use live tick interval here so prop speed is correct regardless of
-    -- whether the server is 33-tick or 66-tick (captured at file load would
-    -- be wrong if tick rate changes or differs from default).
     local ft = engine.TickInterval()
 
     if CurTime() >= self.AltDriftNextPick then
@@ -399,7 +394,6 @@ function ENT:PhysicsUpdate(phys)
     ))
     phys:SetVelocity(vel)
 
-    -- Prop spin: always at max RPM. Compute degrees-per-tick from live interval.
     local propDegsPerTick = 36000 * ft
     self.PropAngle = (self.PropAngle + propDegsPerTick) % 360
     local propAng  = Angle(self.PropAngle, 0, 0)
@@ -538,9 +532,12 @@ function ENT:StartGunBurst(gunIdx, targetPos)
     self:ManipulateBoneAngles(GUN_BONES[gunIdx], Angle(self.GunBarrelStep[gunIdx], 0, 0))
 
     self:SpawnGunMuzzleFX(gunIdx)
+    -- Spatial fire sound: one-shot heard at the position of the muzzle
+    -- (same pattern as the AC-130's BRRT call in StartBurst25mm).
+    local muzzleWorld = self:LocalToWorld(MUZZLE_POINTS[g.MuzzleIndex])
     self:EmitSpatialSound(
         M134_FIRE_SOUNDS[math.random(#M134_FIRE_SOUNDS)],
-        self.CenterPos, WEAPON_LEVEL, math.random(96, 104), 1.0
+        muzzleWorld, WEAPON_LEVEL, math.random(96, 104), 1.0
     )
 end
 
@@ -561,9 +558,10 @@ function ENT:UpdateGunSpray(gunIdx, ct)
     local g = self.Guns[gunIdx]
     if ct >= g.WeaponWindowEnd then return end
     if g.NextSoundTime > 0 and ct >= g.NextSoundTime then
+        local muzzleWorld = self:LocalToWorld(MUZZLE_POINTS[g.MuzzleIndex])
         self:EmitSpatialSound(
             M134_FIRE_SOUNDS[math.random(#M134_FIRE_SOUNDS)],
-            self.CenterPos, WEAPON_LEVEL, math.random(96, 104), 1.0
+            muzzleWorld, WEAPON_LEVEL, math.random(96, 104), 1.0
         )
         self:SpawnGunMuzzleFX(gunIdx)
         self.GunBarrelStep[gunIdx] = (self.GunBarrelStep[gunIdx] + GUN_BARREL_STEP) % 360
@@ -634,21 +632,26 @@ function ENT:SpawnGunMuzzleFX(gunIdx)
 end
 
 -- ============================================================
--- BULLET SPAWN
+-- BULLET SPAWN — mirrors bombin_gau_spawn call site in AC-130 init.lua.
+-- NO per-bullet entity is created here. ac47_m134_spawn() handles the
+-- shared projectile store and sends the net message to clients directly.
+-- The ent_ac47_m134_bullet entity definition still exists so the game
+-- doesn't error on missing entity class, but its Initialize() is never
+-- reached from this path.
 -- ============================================================
 
 function ENT:FireM134BulletAt(muzzlePos, impactPos)
     local dir = impactPos - muzzlePos
     if dir:LengthSqr() < 1 then return end
     dir:Normalize()
-    local bullet = ents.Create("ent_ac47_m134_bullet")
-    if not IsValid(bullet) then return end
-    bullet:SetPos(muzzlePos)
-    bullet:SetAngles(dir:Angle())
-    bullet.Firer     = self
-    bullet.BulletDmg = BULLET_DAMAGE
-    bullet:Spawn()
-    bullet:Activate()
+    -- ac47_m134_spawn is defined in ent_ac47_m134_bullet/init.lua which is
+    -- always loaded (SERVER) before any plane entity is spawned.
+    if ac47_m134_spawn then
+        ac47_m134_spawn(self, self, muzzlePos, dir, BULLET_DAMAGE, nil)
+    else
+        -- Fallback: should never happen in normal load order, but guard anyway.
+        self:Debug("WARN: ac47_m134_spawn not available — bullet skipped")
+    end
 end
 
 -- ============================================================
