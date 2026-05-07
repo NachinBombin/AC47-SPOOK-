@@ -1,6 +1,9 @@
 include("shared.lua")
 include("cl_trailsystem.lua")
 
+-- FIX: declare before net.Receive handler uses it (tier-0 engine loop cleanup)
+ac47_ambient_loops = ac47_ambient_loops or {}
+
 game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
@@ -110,7 +113,6 @@ net.Receive("ac47_plane_damage_tier", function()
 
     -- Stop ambient loop on destroy (tier 0)
     if tier == 0 then
-        ac47_ambient_loops = ac47_ambient_loops or {}
         local snd = ac47_ambient_loops[entIndex]
         if snd then snd:Stop() end
         ac47_ambient_loops[entIndex] = nil
