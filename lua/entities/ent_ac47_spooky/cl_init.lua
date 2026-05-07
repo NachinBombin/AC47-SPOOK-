@@ -6,16 +6,13 @@ PrecacheParticleSystem("fire_medium_02")
 
 -- ============================================================
 -- WEAPON SOUNDS  (spatial, per-player delayed)
+-- NOTE: net.Receive("ac47_plane_spatial_sound") intentionally
+-- NOT registered here. The single authoritative receiver with
+-- AC47EmitSound nil-guard lives in
+-- ent_ac47_m134_bullet/cl_init.lua.
+-- GMod only keeps the LAST registered net.Receive per string;
+-- a second registration here would silently kill that handler.
 -- ============================================================
-
-net.Receive("ac47_plane_spatial_sound", function()
-    local path   = net.ReadString()
-    local pos    = net.ReadVector()
-    local level  = net.ReadUInt(8)
-    local pitch  = net.ReadUInt(8)
-    local volume = net.ReadFloat()
-    sound.Play(path, pos, level, pitch, volume)
-end)
 
 -- ============================================================
 -- DAMAGE TIERS

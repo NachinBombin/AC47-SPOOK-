@@ -6,8 +6,6 @@ include("shared.lua")
 -- Do NOT re-declare it here — double AddNetworkString causes console warnings.
 
 function SWEP:PrimaryAttack()
-    -- Guard: only run on SERVER. PrimaryAttack is predicted and runs on
-    -- both realms; spawning entities on CLIENT would cause errors.
     if not SERVER then return end
 
     local owner = self:GetOwner()
@@ -39,8 +37,6 @@ function SWEP:PrimaryAttack()
         return
     end
 
-    -- BUG3 FIX: read ConVars at fire-time instead of hardcoding values.
-    -- Falls back to sensible defaults if ConVars are unregistered.
     local function gcv(name, default)
         local cv = GetConVar(name)
         return cv and cv:GetFloat() or default
@@ -48,10 +44,10 @@ function SWEP:PrimaryAttack()
 
     plane:SetVar("CenterPos",    hitPos)
     plane:SetVar("CallDir",      callDir)
-    plane:SetVar("Lifetime",     gcv("npc_ac47_lifetime",     40))
-    plane:SetVar("Speed",        gcv("npc_ac47_speed",        280))
-    plane:SetVar("OrbitRadius",  gcv("npc_ac47_orbit_radius", 2800))
-    plane:SetVar("SkyHeightAdd", gcv("npc_ac47_sky_height",   5500))
+    plane:SetVar("Lifetime",     gcv("npc_ac47_lifetime",  40))
+    plane:SetVar("Speed",        gcv("npc_ac47_speed",     280))
+    plane:SetVar("OrbitRadius",  gcv("npc_ac47_radius",    2800))
+    plane:SetVar("SkyHeightAdd", gcv("npc_ac47_height",    5500))  -- FIX: was "npc_ac47_sky_height"
     plane:SetPos(hitPos)
     plane:SetAngles(callDir:Angle())
     plane:Spawn()
