@@ -28,12 +28,15 @@ end
 
 -- Per-entity ambient loop table: entIndex -> CSoundPatch
 -- Managed here so we can stop it when the plane dies or is removed.
+-- NOTE: ac47_plane_damage_tier net.Receive lives in ent_ac47_spooky/cl_init.lua only.
+-- Do NOT add a second receiver here -- GMod silently overwrites it and only the
+-- last-registered handler fires.  Ambient loop teardown is handled there.
 ac47_ambient_loops = ac47_ambient_loops or {}
 
 -- ─── Bullet spawn ───────────────────────────────────────────────────────────
 net.Receive("ac47_m134_bullet_new", function()
     local pos = net.ReadVector()
-    local vel = net.ReadVector()  -- FIX: full velocity vector (Dir * MUZZLE_VEL)
+    local vel = net.ReadVector()  -- full velocity vector (Dir * MUZZLE_VEL)
 
     local store = ac47_m134_store
     store.last_idx = (store.last_idx % store.buffer_size) + 1
@@ -42,7 +45,7 @@ net.Receive("ac47_m134_bullet_new", function()
     slot.pos          = pos
     slot.old_pos      = pos
     slot.vel          = vel
-    slot.speed        = vel:Length()  -- now = MUZZLE_VEL, not 1
+    slot.speed        = vel:Length()
     slot.flyby_played = false
     store.active_projectiles[store.last_idx] = slot
 end)
@@ -66,13 +69,11 @@ net.Receive("ac47_bullet_impact", function()
     local sndIdx    = net.ReadUInt(4)
     sndIdx = math.Clamp(sndIdx, 1, #IMPACT_SOUNDS)
 
-    -- Impact decal + spark effect
     local ed = EffectData()
     ed:SetOrigin(hitPos)
     ed:SetNormal(hitNormal)
     util.Effect("Impact", ed)
 
-    -- Impact bullet mark
     local ed2 = EffectData()
     ed2:SetOrigin(hitPos)
     ed2:SetNormal(hitNormal)
@@ -93,14 +94,11 @@ net.Receive("ac47_plane_spatial_sound", function()
 
     local ent = Entity(entIndex)
 
-    -- Looping engine sounds: manage with CreateSound so we can stop them.
-    -- Any sound path containing "engine" or "rpm" or "far" is treated as a loop.
     local isLoop = string.find(sndPath, "engine") or
                    string.find(sndPath, "rpm")    or
                    string.find(sndPath, "far")
 
     if isLoop then
-        -- Only start if not already running for this entity
         if not ac47_ambient_loops[entIndex] then
             if IsValid(ent) then
                 local snd = CreateSound(ent, sndPath)
@@ -112,22 +110,12 @@ net.Receive("ac47_plane_spatial_sound", function()
             end
         end
     else
-        -- One-shot spatial sound (weapon fire, etc.)
         sound.Play(sndPath, nearPos, level, pitch, volume)
     end
 end)
 
--- Stop ambient loop when plane dies (tier=0 broadcast) or is removed
-net.Receive("ac47_plane_damage_tier", function()
-    local entIndex = net.ReadUInt(16)
-    local tier     = net.ReadUInt(2)
-    if tier == 0 then
-        local snd = ac47_ambient_loops[entIndex]
-        if snd then snd:Stop() end
-        ac47_ambient_loops[entIndex] = nil
-    end
-end)
-
+-- Stop ambient loop when plane is removed from the world.
+-- Tier-0 (destroy) teardown is handled in ent_ac47_spooky/cl_init.lua.
 hook.Add("EntityRemoved", "ac47_ambient_loop_cleanup", function(ent)
     if not IsValid(ent) then return end
     local idx = ent:EntIndex()
@@ -169,12 +157,10 @@ hook.Add("Think", "ac47_m134_bullet_think", function()
             continue
         end
 
-        -- Flyby sound: fire once per bullet when it passes closest point to eye
         if not slot.flyby_played then
-            local dist = slot.pos:Distance(eyePos)
-            -- Only play if bullet is moving toward or past the player
-            local toEye   = eyePos - slot.pos
-            local passing = toEye:Dot(slot.vel) < 0  -- already past closest point
+            local dist  = slot.pos:Distance(eyePos)
+            local toEye = eyePos - slot.pos
+            local passing = toEye:Dot(slot.vel) < 0
 
             if passing then
                 slot.flyby_played = true
