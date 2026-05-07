@@ -1,7 +1,18 @@
---DO NOT EDIT OR REUPLOAD THIS FILE
+-- DO NOT EDIT OR REUPLOAD THIS FILE
+-- BUG-A FIX: DEFINE_BASECLASS will error at autorun time if LFS
+-- (Luna's Flight School) is not installed, crashing every other
+-- entity in this addon. Wrap it so missing LFS is non-fatal.
 
 ENT.Type            = "anim"
-DEFINE_BASECLASS( "lunasflightschool_basescript" )
+
+local ok, err = pcall(function()
+    DEFINE_BASECLASS( "lunasflightschool_basescript" )
+end)
+if not ok then
+    MsgN("[AC-47 Spooky] WARNING: LFS (Luna's Flight School) is not installed or not loaded yet.")
+    MsgN("[AC-47 Spooky] The pilotable tfre_ac47 vehicle will not work, but the NPC support plane is unaffected.")
+    MsgN("[AC-47 Spooky] Error was: " .. tostring(err))
+end
 
 ENT.PrintName = "Douglas AC-47 Spooky"
 ENT.Author = "Ceiling Spiders"
@@ -38,95 +49,23 @@ ENT.WingPos = Vector(65,0,60)
 ENT.ElevatorPos = Vector(-527.67,0,50)
 ENT.RudderPos = Vector(-524.5,0,115)
 
- 
 ENT.MaxVelocity = 2800
-
 ENT.MaxThrust = 1600
-
 ENT.MaxStability = 0.8
-
 ENT.MaxTurnPitch = 150
 ENT.MaxTurnYaw = 270
 ENT.MaxTurnRoll = 100
-
 ENT.MaxPerfVelocity = 1600
-
 ENT.MaxHealth = 2000
-
 ENT.MaxPrimaryAmmo = 4500
 ENT.MaxSecondaryAmmo = 0
 
-
-sound.Add( {
-	name = "TFRE_AC47_ENGINERPM1",
-	channel = CHAN_STATIC,
-	volume = 1.0,
-	level = 125,
-	sound = "lfs/tfre_ac47/skytrain_engine_1rpm.wav"
-} )
-
-sound.Add( {
-	name = "TFRE_AC47_ENGINERPM2",
-	channel = CHAN_STATIC,
-	volume = 1.0,
-	level = 125,
-	sound = "lfs/tfre_ac47/skytrain_engine_2rpm.wav"
-} )
-
-sound.Add( {
-	name = "TFRE_AC47_ENGINERPM3",
-	channel = CHAN_STATIC,
-	volume = 1.0,
-	level = 125,
-	sound = "lfs/tfre_ac47/skytrain_engine_3rpm.wav"
-} )
-
-sound.Add( {
-	name = "TFRE_AC47_ENGINERPM4",
-	channel = CHAN_STATIC,
-	volume = 1.0,
-	level = 125,
-	sound = "lfs/tfre_ac47/skytrain_engine_4rpm.wav"
-} )
-
-sound.Add( {
-	name = "TFRE_AC47_ENGINEDIST",
-	channel = CHAN_STATIC,
-	volume = 1.0,
-	level = 125,
-	sound = "lfs/tfre_ac47/skytrain_engine_far.wav"
-} )
-
-sound.Add( {
-	name = "TFRE_AC47_ENGINESTART",
-	channel = CHAN_STATIC,
-	volume = 1.0,
-	level = 125,
-	sound = "lfs/tfre_ac47/skytrain_engine_start.wav"
-} )
-
-sound.Add( {
-	name = "TFRE_AC47_ENGINESTOP",
-	channel = CHAN_STATIC,
-	volume = 1.0,
-	level = 125,
-	sound = "lfs/tfre_ac47/skytrain_engine_stop.wav"
-} )
-
-sound.Add( {
-	name = "TFRE_AC47_M134_LOOP",
-	channel = CHAN_WEAPON,
-	volume = 1.0,
-	level = 90,
-	sound = "lfs/tfre_ac47/m134_shoot.wav"
-} )
-
-sound.Add( {
-	name = "TFRE_AC47_M134_LASTSHOT",
-	channel = CHAN_WEAPON,
-	volume = 1.0,
-	level = 90,
-	sound = "lfs/tfre_ac47/m134_stop.wav"
-} )
-
-
+sound.Add( { name="TFRE_AC47_ENGINERPM1", channel=CHAN_STATIC, volume=1.0, level=125, sound="lfs/tfre_ac47/skytrain_engine_1rpm.wav" } )
+sound.Add( { name="TFRE_AC47_ENGINERPM2", channel=CHAN_STATIC, volume=1.0, level=125, sound="lfs/tfre_ac47/skytrain_engine_2rpm.wav" } )
+sound.Add( { name="TFRE_AC47_ENGINERPM3", channel=CHAN_STATIC, volume=1.0, level=125, sound="lfs/tfre_ac47/skytrain_engine_3rpm.wav" } )
+sound.Add( { name="TFRE_AC47_ENGINERPM4", channel=CHAN_STATIC, volume=1.0, level=125, sound="lfs/tfre_ac47/skytrain_engine_4rpm.wav" } )
+sound.Add( { name="TFRE_AC47_ENGINEDIST", channel=CHAN_STATIC, volume=1.0, level=125, sound="lfs/tfre_ac47/skytrain_engine_far.wav" } )
+sound.Add( { name="TFRE_AC47_ENGINESTART", channel=CHAN_STATIC, volume=1.0, level=125, sound="lfs/tfre_ac47/skytrain_engine_start.wav" } )
+sound.Add( { name="TFRE_AC47_ENGINESTOP", channel=CHAN_STATIC, volume=1.0, level=125, sound="lfs/tfre_ac47/skytrain_engine_stop.wav" } )
+sound.Add( { name="TFRE_AC47_M134_LOOP", channel=CHAN_WEAPON, volume=1.0, level=90, sound="lfs/tfre_ac47/m134_shoot.wav" } )
+sound.Add( { name="TFRE_AC47_M134_LASTSHOT", channel=CHAN_WEAPON, volume=1.0, level=90, sound="lfs/tfre_ac47/m134_stop.wav" } )

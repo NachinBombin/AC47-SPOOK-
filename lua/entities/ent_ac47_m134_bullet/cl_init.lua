@@ -7,7 +7,7 @@ local MUZZLE_VEL = 56000
 local MAX_DIST   = 45000
 local MIN_SPEED  = 200
 
--- ─── Ring buffer (mirrors server) ────────────────────────────────────────────
+-- Ring buffer (mirrors server)
 ac47_m134_store = ac47_m134_store or {
     last_idx           = 0,
     buffer_size        = 128,
@@ -31,7 +31,7 @@ if #ac47_m134_store.buffer == 0 then
     end
 end
 
--- ─── Net receive: new bullet spawned on server ────────────────────────────────
+-- Net receive: new bullet spawned on server
 net.Receive("ac47_m134_bullet_new", function()
     local pos = net.ReadVector()
     local vel = net.ReadVector()
@@ -50,25 +50,19 @@ net.Receive("ac47_m134_bullet_new", function()
     store.active_projectiles[store.last_idx] = slot
 end)
 
--- ─── Net receive: spatial sound from plane ───────────────────────────────────
+-- Net receive: spatial sound from plane
+-- BUG-B FIX: AC47EmitSound was never defined client-side anywhere.
+-- Removed the dead branch. sound.Play is the correct client-side API.
 net.Receive("ac47_plane_spatial_sound", function()
     local sndPath = net.ReadString()
     local nearPos = net.ReadVector()
     local level   = net.ReadUInt(8)
     local pitch   = net.ReadUInt(8)
     local volume  = net.ReadFloat()
-    -- BUG2 FIX: nil-guard AC47EmitSound.
-    -- On listen-server, entity cl_init files load before autorun/client files,
-    -- so the global may not exist yet on the very first net receive.
-    -- The sound is cosmetic; silently skip rather than crash the tracer system.
-    if AC47EmitSound then
-        AC47EmitSound(sndPath, nearPos, level, pitch, volume)
-    else
-        sound.Play(sndPath, nearPos, level, pitch, volume)
-    end
+    sound.Play(sndPath, nearPos, level, pitch, volume)
 end)
 
--- ─── Think: move active client-side projectiles ──────────────────────────────
+-- Think: move active client-side projectiles
 hook.Add("Think", "ac47_m134_bullet_think", function()
     local store = ac47_m134_store
     local ft    = FrameTime()
@@ -85,7 +79,6 @@ hook.Add("Think", "ac47_m134_bullet_think", function()
             store.active_projectiles[idx] = nil
             continue
         end
-        -- Simple trace for hit detection
         local tr = util.QuickTrace(slot.old_pos, slot.pos - slot.old_pos, NULL)
         if tr.Hit then
             slot.hit = true
@@ -94,7 +87,7 @@ hook.Add("Think", "ac47_m134_bullet_think", function()
     end
 end)
 
--- ─── Render tracer beams ─────────────────────────────────────────────────────
+-- Render tracer beams
 hook.Add("PostDrawTranslucentRenderables", "ac47_m134_bullet_draw", function(bDepth, bSkybox)
     if bSkybox then return end
     local store = ac47_m134_store

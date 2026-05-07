@@ -39,7 +39,10 @@ local VOL_FALLOFF_EXP = 0.01
 local NEAR_OFFSET     = 40
 local WEAPON_LEVEL    = 150
 
-local pending_sounds = {}
+-- BUG-E FIX: pending_sounds was a module-level upvalue shared
+-- across ALL plane instances. OnRemove of one plane wiped every
+-- other plane's queued sounds. Now stored per-instance as
+-- self.pending_sounds, initialised in Initialize().
 
 function ENT:EmitSpatialSound(soundPath, originPos, soundLevel, pitch, baseVol)
     local sendAt = CurTime()
@@ -58,7 +61,7 @@ function ENT:EmitSpatialSound(soundPath, originPos, soundLevel, pitch, baseVol)
             nearPos = plyPos
         end
         local delay = dist / SOUND_SPEED
-        pending_sounds[#pending_sounds + 1] = {
+        self.pending_sounds[#self.pending_sounds + 1] = {
             sendTime  = sendAt + delay,
             ply       = ply,
             soundPath = soundPath,
@@ -70,11 +73,11 @@ function ENT:EmitSpatialSound(soundPath, originPos, soundLevel, pitch, baseVol)
     end
 end
 
-local function FlushPendingSounds()
-    if #pending_sounds == 0 then return end
+function ENT:FlushPendingSounds()
+    if #self.pending_sounds == 0 then return end
     local ct   = CurTime()
     local keep = {}
-    for _, entry in ipairs(pending_sounds) do
+    for _, entry in ipairs(self.pending_sounds) do
         if ct >= entry.sendTime then
             if IsValid(entry.ply) then
                 net.Start("ac47_plane_spatial_sound")
@@ -89,7 +92,7 @@ local function FlushPendingSounds()
             keep[#keep + 1] = entry
         end
     end
-    pending_sounds = keep
+    self.pending_sounds = keep
 end
 
 -- ============================================================
@@ -146,6 +149,9 @@ end
 -- ============================================================
 
 function ENT:Initialize()
+    -- BUG-E FIX: per-instance sound queue
+    self.pending_sounds = {}
+
     self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
     self.CallDir      = self:GetVar("CallDir",   Vector(1, 0, 0))
     self.Lifetime     = self:GetVar("Lifetime",  self.Lifetime)
@@ -335,7 +341,7 @@ function ENT:Think()
     if ct >= self.DieTime then self:Remove() return end
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
-    FlushPendingSounds()
+    self:FlushPendingSounds()
 
     if self.Guns then
         for i = 1, 3 do
@@ -579,29 +585,34 @@ end
 
 -- ============================================================
 -- TARGETING
--- BUG4 FIX: scan both players AND hostile NPCs; return closest
--- threat to the orbit center. Previously only player.GetAll()
--- was checked, so the plane ignored all NPC enemies.
+-- BUG-C FIX: Disposition(Entity(1)) checked the WORLD entity
+-- (Entity(1) == game.GetWorld()), not a player. Every NPC
+-- returns D_NU against the world, so the NPC scan always
+-- returned nothing. Fixed: resolve a live player for the check.
 -- ============================================================
 
 function ENT:GetPrimaryTarget()
     local closest, closestDist = nil, math.huge
 
-    -- Players
     for _, ply in ipairs(player.GetAll()) do
         if not IsValid(ply) or not ply:Alive() then continue end
         local d = ply:GetPos():DistToSqr(self.CenterPos)
         if d < closestDist then closestDist = d closest = ply end
     end
 
-    -- Hostile NPCs (any NPC that is not on the player's side)
-    -- Relationship D_HT (hate) toward players = enemy NPC.
-    for _, npc in ipairs(ents.FindInSphere(self.CenterPos, 8000)) do
-        if not IsValid(npc) or not npc:IsNPC() then continue end
-        -- Skip friendly / neutral NPCs
-        if npc:Disposition(Entity(1)) ~= D_HT then continue end
-        local d = npc:GetPos():DistToSqr(self.CenterPos)
-        if d < closestDist then closestDist = d closest = npc end
+    -- BUG-C FIX: use a real live player for disposition check
+    local refPlayer = nil
+    for _, ply in ipairs(player.GetAll()) do
+        if IsValid(ply) and ply:Alive() then refPlayer = ply break end
+    end
+
+    if refPlayer then
+        for _, npc in ipairs(ents.FindInSphere(self.CenterPos, 8000)) do
+            if not IsValid(npc) or not npc:IsNPC() then continue end
+            if npc:Disposition(refPlayer) ~= D_HT then continue end
+            local d = npc:GetPos():DistToSqr(self.CenterPos)
+            if d < closestDist then closestDist = d closest = npc end
+        end
     end
 
     return closest
@@ -666,5 +677,6 @@ end
 
 function ENT:OnRemove()
     self:StopEngineSounds()
-    pending_sounds = {}
+    -- BUG-E FIX: clear only THIS instance's sound queue, not a shared global
+    self.pending_sounds = {}
 end
