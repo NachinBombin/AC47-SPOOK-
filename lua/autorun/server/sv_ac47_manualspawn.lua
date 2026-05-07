@@ -5,7 +5,6 @@
 
 if not SERVER then return end
 
--- Single declaration of this net string (removed duplicate from weapon init).
 util.AddNetworkString("AC47_ManualSpawn")
 
 net.Receive("AC47_ManualSpawn", function(len, ply)
@@ -34,12 +33,15 @@ net.Receive("AC47_ManualSpawn", function(len, ply)
         return
     end
 
-    ent:SetVar("CenterPos",    centerPos)
-    ent:SetVar("CallDir",      callDir)
-    ent:SetVar("Lifetime",     GetConVar("npc_ac47_lifetime"):GetFloat())
-    ent:SetVar("Speed",        GetConVar("npc_ac47_speed"):GetFloat())
-    ent:SetVar("OrbitRadius",  GetConVar("npc_ac47_radius"):GetFloat())
-    ent:SetVar("SkyHeightAdd", GetConVar("npc_ac47_height"):GetFloat())
+    -- Direct field assignment: GetVar/SetVar are LFS-only methods that do not
+    -- exist on base_gmodentity. Assigning to the entity table before Spawn() is
+    -- the correct pattern; Initialize() reads self.X = self.X or default.
+    ent.CenterPos    = centerPos
+    ent.CallDir      = callDir
+    ent.Lifetime     = GetConVar("npc_ac47_lifetime"):GetFloat()
+    ent.Speed        = GetConVar("npc_ac47_speed"):GetFloat()
+    ent.OrbitRadius  = GetConVar("npc_ac47_radius"):GetFloat()
+    ent.SkyHeightAdd = GetConVar("npc_ac47_height"):GetFloat()
     ent:SetPos(centerPos)
     ent:SetAngles(callDir:Angle())
     ent:Spawn()
