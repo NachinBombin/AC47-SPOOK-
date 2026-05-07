@@ -84,22 +84,14 @@ local function FireBombinAC47(centerPos, callDir)
     timer.Simple(delay, function() SpawnPlane(centerPos, callDir) end)
 end
 
--- BUG5 FIX: net string + handler for the give SWEP button in the menu.
--- Gives weapon_ac47_call to the requesting player (admin-only check).
-util.AddNetworkString("AC47_GiveSWEP")
-net.Receive("AC47_GiveSWEP", function(_, ply)
-    if not IsValid(ply) then return end
-    if not ply:IsAdmin() then
-        ply:ChatPrint("[AC-47] Admin only.")
-        return
-    end
-    ply:Give("weapon_ac47_call")
-    ply:ChatPrint("[AC-47] Given weapon_ac47_call. Aim at a position and LEFT-CLICK.")
-end)
+-- BUG1 FIX: removed AC47_GiveSWEP net handler.
+-- weapon_ac47_call was intentionally deleted from this addon.
+-- ply:Give("weapon_ac47_call") would silently fail every time.
+-- The button has also been removed from cl_ac47_menu.lua (BUG2).
 
 -- Main timer
--- BUG7 CONFIRMED OK: 1s heartbeat + NextCheckTime pattern means
--- changing npc_ac47_interval via slider takes effect immediately.
+-- 1s heartbeat + NextCheckTime pattern means changing
+-- npc_ac47_interval via slider takes effect immediately.
 local NextCheckTime = 0
 
 timer.Create("ac47_npc_brain", 1, 0, function()

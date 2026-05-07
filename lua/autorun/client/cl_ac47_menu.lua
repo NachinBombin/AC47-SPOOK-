@@ -78,8 +78,8 @@ local function BuildAC47Panel(panel)
     panel:NumSlider("AC-47 lifetime (seconds)", "npc_ac47_lifetime",  5,   120, 0)
 
     AddColoredCategory(panel, "Flight Behaviour")
-    panel:NumSlider("AC-47 speed (HU/s)",                "npc_ac47_speed",  100, 800,  0)
-    panel:NumSlider("Orbit radius (HU)",                 "npc_ac47_radius", 500, 8000, 0)
+    panel:NumSlider("AC-47 speed (HU/s)",                 "npc_ac47_speed",  100, 800,  0)
+    panel:NumSlider("Orbit radius (HU)",                  "npc_ac47_radius", 500, 8000, 0)
     panel:NumSlider("Preferred height above ground (HU)", "npc_ac47_height", 500, 8000, 0)
 
     AddColoredCategory(panel, "Engagement Range")
@@ -89,33 +89,16 @@ local function BuildAC47Panel(panel)
     AddColoredCategory(panel, "Debug")
     panel:CheckBox("Enable debug prints", "npc_ac47_announce")
 
-    -- Manual Spawn
+    -- BUG2 FIX: removed "Give AC-47 Call SWEP" button and ac47_give_swep
+    -- concommand. weapon_ac47_call does not exist; the button was dead UI.
     AddColoredCategory(panel, "Manual Spawn")
     panel:Button("Spawn AC-47 Spooky now", "ac47_spawnplane")
-
-    -- BUG5 FIX: expose the SWEP directly from the panel so players
-    -- don't have to hunt through the Weapons tab to find it.
-    -- 'give' is a built-in GMod concommand available to admins.
-    local giveBtn = panel:Button("Give AC-47 Call SWEP", "ac47_give_swep")
-    if giveBtn then
-        giveBtn:SetTooltip("Gives you the weapon_ac47_call SWEP.\nAim at a position and LEFT-CLICK to call the AC-47.")
-    end
 end
 
 -- Console command: manual test spawn
 concommand.Add("ac47_spawnplane", function()
     if not IsValid(LocalPlayer()) then return end
     net.Start("AC47_ManualSpawn")
-    net.SendToServer()
-end)
-
--- BUG5 FIX: give SWEP command
--- Sends a net message to the server to give the SWEP.
--- Using RunConsoleCommand("give", ...) would only work for admins
--- and only if sv_cheats is on. Net message is the correct pattern.
-concommand.Add("ac47_give_swep", function()
-    if not IsValid(LocalPlayer()) then return end
-    net.Start("AC47_GiveSWEP")
     net.SendToServer()
 end)
 

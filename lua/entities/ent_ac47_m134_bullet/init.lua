@@ -27,9 +27,12 @@ local IMPACT_SOUNDS = {
 
 for _, s in ipairs(M134_FIRE_SOUNDS) do util.PrecacheSound(s) end
 
-util.AddNetworkString("ac47_m134_projectile")
+-- BUG3 FIX: was "ac47_m134_projectile" — did not match cl_init.lua
+-- receiver "ac47_m134_bullet_new". Client never got bullet spawns;
+-- zero tracers rendered. Both sides must use the same string.
+util.AddNetworkString("ac47_m134_bullet_new")
 
--- ─── Shared projectile store ──────────────────────────────────────────────────
+-- ─── Shared projectile store ─────────────────────────────────────────────────
 ac47_m134_store = ac47_m134_store or {
     last_idx           = 0,
     buffer_size        = 128,
@@ -71,8 +74,8 @@ function ENT:Initialize()
     self.DistTraveled = 0
     self.Dead         = false
 
-    -- Broadcast to clients so they can simulate tracer + passby
-    net.Start("ac47_m134_projectile")
+    -- BUG3 FIX: renamed to match cl_init.lua net.Receive
+    net.Start("ac47_m134_bullet_new")
         net.WriteVector(self:GetPos())
         net.WriteVector(self.Dir)
     net.Broadcast()
@@ -105,7 +108,6 @@ function ENT:Think()
             tr.HitPos, 75, math.random(95, 105), 1.0
         )
 
-        -- Bug fix: operator precedence — must check IsValid before calling methods
         if IsValid(tr.Entity) and (tr.Entity:IsNPC() or tr.Entity:IsPlayer()) then
             local dmginfo = DamageInfo()
             dmginfo:SetDamage(self.BulletDmg)
