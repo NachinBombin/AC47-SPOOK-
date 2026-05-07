@@ -5,7 +5,6 @@ include("shared.lua")
 
 -- ============================================================
 -- SOUNDS
--- All paths match the LFS AC-47 content pack exactly.
 -- ============================================================
 
 local M134_FIRE_SOUNDS = {
@@ -28,7 +27,7 @@ util.AddNetworkString("ac47_plane_damage_tier")
 util.AddNetworkString("ac47_plane_spatial_sound")
 
 -- ============================================================
--- SPATIAL SOUND SYSTEM  (same as AC-130, prefixed ac47_)
+-- SPATIAL SOUND SYSTEM
 -- ============================================================
 
 local SOUND_SPEED     = 8200
@@ -91,57 +90,59 @@ local function FlushPendingSounds()
 end
 
 -- ============================================================
--- ENT PROPERTIES
--- Three M134 miniguns, left (port) side, sequentially cycled.
--- Muzzle positions from the original tfre_ac47 entity:
---   fP[1] = Vector(-170, 66, 101.44)
---   fP[2] = Vector(-208, 66, 95)
---   fP[3] = Vector(-259, 66, 85.6)
+-- CONSTANTS
 -- ============================================================
 
--- M134 burst settings
-ENT.M134_BurstCount       = 40      -- bullets per burst
-ENT.M134_BurstDelay       = 0.033   -- ~30 rps per barrel (M134 cyclic rate 2000-6000 rpm, 3 guns)
-ENT.M134_FirstBurstTime   = 0
-ENT.M134_SecondBurstTime  = 4
-ENT.M134_SweepHalfLength  = 500
-ENT.M134_JitterAmount     = 180
-ENT.M134_SpraySoundDelay  = 1.2
-ENT.M134_SprayPauseDuration = 0.5
-ENT.M134_BulletDamage     = 18
-ENT.M134_TargetOffsetMin  = 200
-ENT.M134_TargetOffsetMax  = 700
-
--- Weapon timing
-ENT.WeaponWindow          = 10
-
--- Muzzle positions in local entity space (port side guns)
--- Exactly matching the tfre_ac47 fP table
-ENT.MuzzlePoints = {
+-- Muzzle positions in local entity space (port side guns, from tfre_ac47 fP table)
+local MUZZLE_POINTS = {
     Vector(-170, 66, 101.44),
     Vector(-208, 66, 95),
     Vector(-259, 66, 85.6),
 }
 
--- Flight
+-- Barrel bone indices on the AC-47 model (from tfre_ac47 ManipulateBoneAngles)
+local BARREL_BONES = { 22, 23, 24 }
+
+-- M134 cyclic constants
+local BURST_DELAY    = 0.033   -- ~30 rps
+local BURST_COUNT    = 40      -- bullets per burst
+local BULLET_DAMAGE  = 18
+local SWEEP_HALF     = 500     -- half-length of sweep line
+local JITTER         = 180
+local TARGET_OFF_MIN = 200
+local TARGET_OFF_MAX = 700
+local PEACEFUL_MIN   = 4
+local PEACEFUL_MAX   = 7
+local WEAPON_WINDOW  = 10
+local SPRAY_SOUND_DELAY   = 1.2
+local SPRAY_PAUSE_DURATION = 0.5
+
+-- Rotor RPM — always max; 6000 rpm = 100 rps = 36000 deg/s
+local ROTOR_DEGS_PER_TICK = 36000 * engine.TickInterval()
+
+-- ============================================================
+-- ENT PROPERTIES
+-- ============================================================
+
 ENT.Speed        = 280
 ENT.OrbitRadius  = 2800
 ENT.SkyHeightAdd = 5500
 ENT.Lifetime     = 40
-
--- HP & damage tiers
-ENT.MaxHP = 6000
+ENT.MaxHP        = 6000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
-
 ENT.Plane_Ambient_SoundPath = "lfs/tfre_ac47/skytrain_engine_1rpm.wav"
 
 -- ============================================================
--- INITIALIZE
+-- DEBUG
 -- ============================================================
 
 function ENT:Debug(msg)
     print("[AC-47 Spooky] " .. tostring(msg))
 end
+
+-- ============================================================
+-- INITIALIZE
+-- ============================================================
 
 function ENT:Initialize()
     self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
@@ -151,15 +152,15 @@ function ENT:Initialize()
     self.OrbitRadius  = self:GetVar("OrbitRadius", self.OrbitRadius)
     self.SkyHeightAdd = self:GetVar("SkyHeightAdd", self.SkyHeightAdd)
 
-    if self.CallDir:LengthSqr() <= 1 then self.CallDir = Vector(1,0,0) end
+    if self.CallDir:LengthSqr() <= 1 then self.CallDir = Vector(1, 0, 0) end
     self.CallDir.z = 0
     self.CallDir:Normalize()
 
     local ground = self:FindGround(self.CenterPos)
     if ground == -1 then self:Debug("FindGround failed") self:Remove() return end
 
-    self.sky      = ground + self.SkyHeightAdd
-    self.DieTime  = CurTime() + self.Lifetime
+    self.sky       = ground + self.SkyHeightAdd
+    self.DieTime   = CurTime() + self.Lifetime
     self.SpawnTime = CurTime()
 
     local spawnPos = self.CenterPos - self.CallDir * 2000
@@ -169,7 +170,6 @@ function ENT:Initialize()
     end
     if not util.IsInWorld(spawnPos) then self:Debug("spawnPos out of world") self:Remove() return end
 
-    -- Use the exact model path from the LFS addon
     self:SetModel("models/tfre/vehicles/ac47_spooky/ac47_spooky.mdl")
     self:PhysicsInit(SOLID_VPHYSICS)
     self:SetMoveType(MOVETYPE_VPHYSICS)
@@ -212,24 +212,47 @@ function ENT:Initialize()
         self.EngineLoop:Play()
     end
 
-    -- Weapon state
-    self.CurrentWeapon       = nil
-    self.WeaponWindowEnd     = 0
-    self.IsPeaceful          = false
-    self.PeacefulUntil       = 0
-    self._PendingWeapon      = nil
-    self.M134_BurstTimes     = {}
-    self.M134_BurstsFired    = 0
-    self.M134_ActiveBursts   = {}
-    self.M134_SweepStartPos  = nil
-    self.M134_SweepEndPos    = nil
-    self.M134_SprayBurstEnd  = 0
-    self.M134_SprayBulletCount = 0
-    self.NextShotTimeSpray   = 0
-    self.NextSpraySoundTime  = 0
-    self.MuzzleIndex         = 1   -- cycles 1→2→3→1 per bullet
-    self.IsDestroyed         = false
-    self.DamageTier          = 0
+    -- Rotor accumulator (degrees, always spinning at max)
+    self.RotorAngle = 0
+
+    -- ── Three independent gun states ──────────────────────────
+    -- Each gun has: IsPeaceful, PeacefulUntil, CurrentWeapon,
+    -- WeaponWindowEnd, PendingWeapon, sweep state, burst state,
+    -- spray state, MuzzleIndex (fixed per gun).
+    self.Guns = {}
+    local ct = CurTime()
+    for i = 1, 3 do
+        self.Guns[i] = {
+            -- identity
+            MuzzleIndex = i,     -- each gun always fires from its own fixed muzzle
+            -- peaceful
+            IsPeaceful    = true,
+            PeacefulUntil = ct + math.Rand(0, PEACEFUL_MAX) * (i - 1),  -- stagger starts
+            PendingWeapon = nil,
+            -- active weapon
+            CurrentWeapon   = nil,
+            WeaponWindowEnd = 0,
+            -- burst mode state
+            BurstTimes    = {},
+            ActiveBursts  = {},
+            SweepStart    = nil,
+            SweepEnd      = nil,
+            -- spray mode state
+            NextShotTime    = 0,
+            NextSoundTime   = 0,
+            SprayBurstEnd   = 0,
+            SprayBulletCount= 0,
+            -- per-gun aim vector (set when armed, slightly offset per gun)
+            AimOffset = Vector(
+                math.Rand(-120, 120),
+                math.Rand(-120, 120),
+                0
+            ),
+        }
+    end
+
+    self.IsDestroyed = false
+    self.DamageTier  = 0
 
     self:Debug("Spawned at " .. tostring(spawnPos))
 end
@@ -301,14 +324,20 @@ function ENT:Think()
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
     FlushPendingSounds()
-    self:HandleWeaponWindow(ct)
-    self:UpdateActiveM134Bursts(ct)
+
+    -- Update all three guns independently
+    if self.Guns then
+        for i = 1, 3 do
+            self:HandleGunWindow(i, ct)
+        end
+    end
+
     self:NextThink(ct)
     return true
 end
 
 -- ============================================================
--- PHYSICS UPDATE (orbit + banking)
+-- PHYSICS UPDATE (orbit + banking + rotor spin)
 -- ============================================================
 
 function ENT:PhysicsUpdate(phys)
@@ -317,6 +346,7 @@ function ENT:PhysicsUpdate(phys)
     local pos = self:GetPos()
     self.LastPos = pos
 
+    -- Altitude drift
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
@@ -327,6 +357,7 @@ function ENT:PhysicsUpdate(phys)
     local jitter     = math.sin(self.JitterPhase) * self.JitterAmplitude
     local liveAlt    = self.AltDriftCurrent + jitter
 
+    -- Orbit yaw
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
     local dist       = flatPos:Distance(flatCenter)
@@ -362,98 +393,199 @@ function ENT:PhysicsUpdate(phys)
         liveAlt
     ))
     phys:SetVelocity(vel)
+
+    -- ── Rotor spin — always at max RPM ────────────────────────
+    -- Accumulate angle and apply to all three barrel bone groups.
+    self.RotorAngle = (self.RotorAngle + ROTOR_DEGS_PER_TICK) % 360
+    for _, boneIdx in ipairs(BARREL_BONES) do
+        self:ManipulateBoneAngles(boneIdx, Angle(self.RotorAngle, 0, 0))
+    end
 end
 
 -- ============================================================
--- WEAPON CYCLE
--- Only weapon: M134 triple minigun. Two modes: burst and spray.
+-- THREE-GUN INDEPENDENT WEAPON CYCLE
+-- Each of the 3 guns has completely independent state.
 -- ============================================================
 
-local PEACEFUL_MIN = 4
-local PEACEFUL_MAX = 7
+function ENT:HandleGunWindow(gunIdx, ct)
+    local g = self.Guns[gunIdx]
+    if not g then return end
 
-function ENT:HandleWeaponWindow(ct)
-    if self.IsPeaceful then
-        if ct >= self.PeacefulUntil then
-            self.IsPeaceful = false
-            self:ArmWeapon(self._PendingWeapon, ct)
-            self._PendingWeapon = nil
+    if g.IsPeaceful then
+        if ct >= g.PeacefulUntil then
+            g.IsPeaceful = false
+            self:ArmGun(gunIdx, g.PendingWeapon, ct)
+            g.PendingWeapon = nil
         end
         return
     end
 
-    if not self.CurrentWeapon then
-        self:EnterPeaceful(ct)
+    if not g.CurrentWeapon then
+        self:EnterGunPeaceful(gunIdx, ct)
         return
     end
 
-    if ct >= self.WeaponWindowEnd then
-        self:EnterPeaceful(ct)
+    if ct >= g.WeaponWindowEnd then
+        self:EnterGunPeaceful(gunIdx, ct)
         return
     end
 
-    if     self.CurrentWeapon == "m134_burst" then self:UpdateM134BurstsSchedule(ct)
-    elseif self.CurrentWeapon == "m134_spray" then self:UpdateM134Spray(ct) end
+    if     g.CurrentWeapon == "burst" then self:UpdateGunBurst(gunIdx, ct)
+    elseif g.CurrentWeapon == "spray" then self:UpdateGunSpray(gunIdx, ct) end
 end
 
-function ENT:EnterPeaceful(ct)
-    self:StopSprayLoop()
-    self.CurrentWeapon  = nil
-    self.IsPeaceful     = true
-    self.PeacefulUntil  = ct + math.Rand(PEACEFUL_MIN, PEACEFUL_MAX)
-    self._PendingWeapon = self:RollWeapon()
+function ENT:EnterGunPeaceful(gunIdx, ct)
+    local g = self.Guns[gunIdx]
+    g.CurrentWeapon  = nil
+    g.IsPeaceful     = true
+    g.PeacefulUntil  = ct + math.Rand(PEACEFUL_MIN, PEACEFUL_MAX)
+    g.PendingWeapon  = math.random() < 0.6 and "burst" or "spray"
+    -- refresh the per-gun aim offset so each gun picks a slightly different patch
+    g.AimOffset = Vector(
+        math.Rand(-120, 120),
+        math.Rand(-120, 120),
+        0
+    )
 end
 
-function ENT:RollWeapon()
-    -- 60% burst, 40% spray — both use the M134
-    return math.random() < 0.6 and "m134_burst" or "m134_spray"
-end
+function ENT:ArmGun(gunIdx, weapon, ct)
+    local g = self.Guns[gunIdx]
+    weapon = weapon or (math.random() < 0.6 and "burst" or "spray")
+    g.CurrentWeapon   = weapon
+    g.WeaponWindowEnd = ct + WEAPON_WINDOW
 
-function ENT:ArmWeapon(weapon, ct)
-    weapon = weapon or self:RollWeapon()
-    self.CurrentWeapon   = weapon
-    self.WeaponWindowEnd = ct + self.WeaponWindow
+    local targetPos = self:GetGunTargetPos(gunIdx)
 
-    if self.CurrentWeapon == "m134_burst" then
-        self.M134_BurstTimes  = { ct + self.M134_FirstBurstTime, ct + self.M134_SecondBurstTime }
-        self.M134_BurstsFired = 0
-        self.M134_ActiveBursts = {}
-    elseif self.CurrentWeapon == "m134_spray" then
-        self.NextShotTimeSpray   = ct
-        self.NextSpraySoundTime  = ct
-        self.M134_SprayBulletCount = 0
-        self.M134_SprayBurstEnd  = 0
-        local targetPos = self:GetTargetGroundPos()
-        local sweepDir  = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
-        if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1,0,0) end
+    if weapon == "burst" then
+        -- Two bursts within the window
+        g.BurstTimes   = { ct, ct + 4 }
+        g.ActiveBursts = {}
+        g.SweepStart   = nil
+        g.SweepEnd     = nil
+        self:StartGunBurst(gunIdx, targetPos)
+        g.BurstTimes[1] = false  -- first burst fired immediately on arm
+    elseif weapon == "spray" then
+        g.NextShotTime     = ct
+        g.NextSoundTime    = ct
+        g.SprayBulletCount = 0
+        g.SprayBurstEnd    = 0
+        local sweepDir = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
+        if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1, 0, 0) end
         sweepDir:Normalize()
-        self.M134_SweepStartPos = targetPos - sweepDir * self.M134_SweepHalfLength
-        self.M134_SweepEndPos   = targetPos + sweepDir * self.M134_SweepHalfLength
+        g.SweepStart = targetPos - sweepDir * SWEEP_HALF
+        g.SweepEnd   = targetPos + sweepDir * SWEEP_HALF
     end
 end
 
--- ============================================================
--- SPRAY HELPERS
--- ============================================================
-
-function ENT:StopSprayLoop()
-    self.NextSpraySoundTime = 0
-    self.M134_SprayBurstEnd = 0
+-- ── Per-gun target position ────────────────────────────────────
+-- Each gun has its own AimOffset so the three streams hit slightly
+-- different patches of ground even when targeting the same entity.
+function ENT:GetGunTargetPos(gunIdx)
+    local g = self.Guns[gunIdx]
+    local target  = self:GetPrimaryTarget()
+    local basePos
+    if IsValid(target) then
+        basePos = target:GetPos()
+    else
+        local tr = util.QuickTrace(
+            Vector(self.CenterPos.x, self.CenterPos.y, self.sky),
+            Vector(0, 0, -30000), self)
+        basePos = tr.HitPos
+    end
+    local offsetDist = math.Rand(TARGET_OFF_MIN, TARGET_OFF_MAX)
+    local offsetDir  = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
+    if offsetDir:LengthSqr() < 0.01 then offsetDir = Vector(1, 0, 0) end
+    offsetDir:Normalize()
+    return basePos + offsetDir * offsetDist + (g and g.AimOffset or Vector(0,0,0))
 end
 
-function ENT:PlaySpraySoundAndFlash(ct)
+-- ── Burst update ──────────────────────────────────────────────
+function ENT:UpdateGunBurst(gunIdx, ct)
+    local g = self.Guns[gunIdx]
+    -- schedule the second burst
+    for i, t in ipairs(g.BurstTimes) do
+        if t ~= false and ct >= t and ct < g.WeaponWindowEnd then
+            self:StartGunBurst(gunIdx, self:GetGunTargetPos(gunIdx))
+            g.BurstTimes[i] = false
+        end
+    end
+    -- tick active bursts
+    local active = g.ActiveBursts
+    for idx = #active, 1, -1 do
+        local burst = active[idx]
+        if not burst then table.remove(active, idx) continue end
+        if ct >= burst.nextTime then
+            burst.bulletsFired = burst.bulletsFired + 1
+            burst.nextTime     = ct + BURST_DELAY
+            self:FireGunBullet(gunIdx, burst)
+            if burst.bulletsFired >= BURST_COUNT then
+                table.remove(active, idx)
+            end
+        end
+    end
+end
+
+function ENT:StartGunBurst(gunIdx, targetPos)
+    local g = self.Guns[gunIdx]
+    local sweepDir = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
+    if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1, 0, 0) end
+    sweepDir:Normalize()
+    g.SweepStart = targetPos - sweepDir * SWEEP_HALF
+    g.SweepEnd   = targetPos + sweepDir * SWEEP_HALF
+    table.insert(g.ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
+    self:SpawnGunMuzzleFX(gunIdx)
     self:EmitSpatialSound(
         M134_FIRE_SOUNDS[math.random(#M134_FIRE_SOUNDS)],
-        self.CenterPos,
-        WEAPON_LEVEL,
-        math.random(96, 104),
-        1.0
+        self.CenterPos, WEAPON_LEVEL, math.random(96, 104), 1.0
     )
-    self:SpawnMuzzleFX()
-    local fireDuration        = self.M134_SpraySoundDelay - self.M134_SprayPauseDuration
-    self.M134_SprayBurstEnd  = ct + fireDuration
-    self.NextShotTimeSpray   = ct
-    self.NextSpraySoundTime  = ct + self.M134_SpraySoundDelay
+end
+
+function ENT:FireGunBullet(gunIdx, burst)
+    local g = self.Guns[gunIdx]
+    if not g.SweepStart then return end
+    local fraction   = math.Clamp((burst.bulletsFired - 1) / (BURST_COUNT - 1), 0, 1)
+    local baseImpact = LerpVector(fraction, g.SweepStart, g.SweepEnd)
+    local jitter     = Vector(
+        math.Rand(-JITTER, JITTER),
+        math.Rand(-JITTER, JITTER),
+        0
+    )
+    local muzzlePos = self:LocalToWorld(MUZZLE_POINTS[g.MuzzleIndex])
+    self:FireM134BulletAt(muzzlePos, baseImpact + jitter)
+end
+
+-- ── Spray update ──────────────────────────────────────────────
+function ENT:UpdateGunSpray(gunIdx, ct)
+    local g = self.Guns[gunIdx]
+    if ct >= g.WeaponWindowEnd then return end
+
+    -- sound heartbeat
+    if g.NextSoundTime > 0 and ct >= g.NextSoundTime then
+        self:EmitSpatialSound(
+            M134_FIRE_SOUNDS[math.random(#M134_FIRE_SOUNDS)],
+            self.CenterPos, WEAPON_LEVEL, math.random(96, 104), 1.0
+        )
+        self:SpawnGunMuzzleFX(gunIdx)
+        local fireDuration = SPRAY_SOUND_DELAY - SPRAY_PAUSE_DURATION
+        g.SprayBurstEnd  = ct + fireDuration
+        g.NextShotTime   = ct
+        g.NextSoundTime  = ct + SPRAY_SOUND_DELAY
+    end
+
+    if ct >= g.SprayBurstEnd then return end
+    if ct < g.NextShotTime   then return end
+
+    g.NextShotTime     = ct + BURST_DELAY
+    g.SprayBulletCount = g.SprayBulletCount + 1
+
+    local targetPos   = self:GetGunTargetPos(gunIdx)
+    local finalImpact = targetPos + Vector(
+        math.Rand(-JITTER * 2, JITTER * 2),
+        math.Rand(-JITTER * 2, JITTER * 2),
+        0
+    )
+    local muzzlePos = self:LocalToWorld(MUZZLE_POINTS[g.MuzzleIndex])
+    self:FireM134BulletAt(muzzlePos, finalImpact)
 end
 
 -- ============================================================
@@ -470,38 +602,13 @@ function ENT:GetPrimaryTarget()
     return closest
 end
 
-function ENT:GetTargetGroundPos()
-    local target  = self:GetPrimaryTarget()
-    local basePos
-    if IsValid(target) then
-        basePos = target:GetPos()
-    else
-        local tr = util.QuickTrace(Vector(self.CenterPos.x, self.CenterPos.y, self.sky), Vector(0,0,-30000), self)
-        basePos = tr.HitPos
-    end
-    local offsetDist = math.Rand(self.M134_TargetOffsetMin, self.M134_TargetOffsetMax)
-    local offsetDir  = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
-    if offsetDir:LengthSqr() < 0.01 then offsetDir = Vector(1,0,0) end
-    offsetDir:Normalize()
-    return basePos + offsetDir * offsetDist
-end
-
 -- ============================================================
--- MUZZLE
--- Cycles through the three M134 gun positions 1→2→3→1
+-- MUZZLE FX
 -- ============================================================
 
-function ENT:GetWeaponMuzzleWorldPos()
-    if self.MuzzleIndex < 1 or self.MuzzleIndex > #self.MuzzlePoints then
-        self.MuzzleIndex = 1
-    end
-    local pos = self:LocalToWorld(self.MuzzlePoints[self.MuzzleIndex])
-    self.MuzzleIndex = (self.MuzzleIndex % #self.MuzzlePoints) + 1
-    return pos
-end
-
-function ENT:SpawnMuzzleFX()
-    local worldPos = self:LocalToWorld(self.MuzzlePoints[self.MuzzleIndex])
+function ENT:SpawnGunMuzzleFX(gunIdx)
+    local g = self.Guns[gunIdx]
+    local worldPos = self:LocalToWorld(MUZZLE_POINTS[g.MuzzleIndex])
     local ang      = self:GetAngles()
     local ed = EffectData()
     ed:SetOrigin(worldPos) ed:SetAngles(ang) ed:SetScale(0.6)
@@ -515,100 +622,21 @@ function ENT:SpawnMuzzleFX()
 end
 
 -- ============================================================
--- M134 BURST FIRE
+-- BULLET SPAWN
 -- ============================================================
 
 function ENT:FireM134BulletAt(muzzlePos, impactPos)
     local dir = impactPos - muzzlePos
     if dir:LengthSqr() < 1 then return end
     dir:Normalize()
-
     local bullet = ents.Create("ent_ac47_m134_bullet")
     if not IsValid(bullet) then return end
     bullet:SetPos(muzzlePos)
     bullet:SetAngles(dir:Angle())
     bullet.Firer    = self
-    bullet.BulletDmg = self.M134_BulletDamage
+    bullet.BulletDmg = BULLET_DAMAGE
     bullet:Spawn()
     bullet:Activate()
-end
-
-function ENT:UpdateM134BurstsSchedule(ct)
-    if not self.M134_BurstTimes then return end
-    for i, t in ipairs(self.M134_BurstTimes) do
-        if t ~= false and ct >= t and ct < self.WeaponWindowEnd then
-            self:StartM134Burst()
-            self.M134_BurstTimes[i] = false
-            self.M134_BurstsFired   = self.M134_BurstsFired + 1
-        end
-    end
-end
-
-function ENT:StartM134Burst()
-    local targetPos = self:GetTargetGroundPos()
-    local sweepDir  = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
-    if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1,0,0) end
-    sweepDir:Normalize()
-    self.M134_SweepStartPos = targetPos - sweepDir * self.M134_SweepHalfLength
-    self.M134_SweepEndPos   = targetPos + sweepDir * self.M134_SweepHalfLength
-    table.insert(self.M134_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
-    self:SpawnMuzzleFX()
-    self:EmitSpatialSound(
-        M134_FIRE_SOUNDS[math.random(#M134_FIRE_SOUNDS)],
-        self.CenterPos,
-        WEAPON_LEVEL,
-        math.random(96, 104),
-        1.0
-    )
-end
-
-function ENT:UpdateActiveM134Bursts(ct)
-    if not self.M134_ActiveBursts then return end
-    for idx = #self.M134_ActiveBursts, 1, -1 do
-        local burst = self.M134_ActiveBursts[idx]
-        if not burst then
-            table.remove(self.M134_ActiveBursts, idx)
-        elseif ct >= burst.nextTime then
-            burst.bulletsFired = burst.bulletsFired + 1
-            burst.nextTime     = ct + self.M134_BurstDelay
-            self:FireSingleM134Bullet(burst.bulletsFired)
-            if burst.bulletsFired >= self.M134_BurstCount then
-                table.remove(self.M134_ActiveBursts, idx)
-            end
-        end
-    end
-end
-
-function ENT:FireSingleM134Bullet(bulletIndex)
-    if not self.M134_SweepStartPos then return end
-    local fraction   = math.Clamp((bulletIndex - 1) / (self.M134_BurstCount - 1), 0, 1)
-    local baseImpact = LerpVector(fraction, self.M134_SweepStartPos, self.M134_SweepEndPos)
-    local jitter     = Vector(
-        math.Rand(-self.M134_JitterAmount, self.M134_JitterAmount),
-        math.Rand(-self.M134_JitterAmount, self.M134_JitterAmount),
-        0
-    )
-    local muzzlePos = self:GetWeaponMuzzleWorldPos()
-    self:FireM134BulletAt(muzzlePos, baseImpact + jitter)
-end
-
-function ENT:UpdateM134Spray(ct)
-    if ct >= self.WeaponWindowEnd then self:StopSprayLoop() return end
-    if self.NextSpraySoundTime > 0 and ct >= self.NextSpraySoundTime then
-        self:PlaySpraySoundAndFlash(ct)
-    end
-    if ct >= (self.M134_SprayBurstEnd or 0) then return end
-    if ct < self.NextShotTimeSpray then return end
-    self.NextShotTimeSpray     = ct + self.M134_BurstDelay
-    self.M134_SprayBulletCount = self.M134_SprayBulletCount + 1
-    local targetPos = self:GetTargetGroundPos()
-    local finalImpact = targetPos + Vector(
-        math.Rand(-self.M134_JitterAmount * 2, self.M134_JitterAmount * 2),
-        math.Rand(-self.M134_JitterAmount * 2, self.M134_JitterAmount * 2),
-        0
-    )
-    local muzzlePos = self:GetWeaponMuzzleWorldPos()
-    self:FireM134BulletAt(muzzlePos, finalImpact)
 end
 
 -- ============================================================
@@ -633,6 +661,5 @@ end
 
 function ENT:OnRemove()
     if self.EngineLoop then self.EngineLoop:Stop() self.EngineLoop = nil end
-    if not self.IsDestroyed then self:StopSprayLoop() end
     pending_sounds = {}
 end

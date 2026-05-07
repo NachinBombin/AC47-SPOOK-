@@ -2,15 +2,19 @@ AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
-util.AddNetworkString("ac47_call_plane")
+-- Net string used by the manual spawn handler in sv_ac47_manualspawn.lua.
+-- The SWEP direct-spawns on SERVER only (no net needed here, but we keep
+-- the string registered so the tool menu button also works).
+util.AddNetworkString("AC47_ManualSpawn")
 
 function SWEP:PrimaryAttack()
-    if not IsFirstTimePredicted() then return end
+    -- Guard: only run on SERVER. PrimaryAttack is predicted and runs on
+    -- both realms; spawning entities on CLIENT would cause errors.
+    if not SERVER then return end
 
     local owner = self:GetOwner()
     if not IsValid(owner) then return end
 
-    -- Trace to find the call-in position on the ground
     local tr = util.TraceLine({
         start  = owner:EyePos(),
         endpos = owner:EyePos() + owner:GetAimVector() * 50000,
@@ -25,6 +29,11 @@ function SWEP:PrimaryAttack()
     callDir.z = 0
     if callDir:LengthSqr() < 0.01 then callDir = owner:GetForward() callDir.z = 0 end
     callDir:Normalize()
+
+    if not scripted_ents.GetStored("ent_ac47_spooky") then
+        MsgN("[AC-47 Call] ent_ac47_spooky not registered")
+        return
+    end
 
     local plane = ents.Create("ent_ac47_spooky")
     if not IsValid(plane) then

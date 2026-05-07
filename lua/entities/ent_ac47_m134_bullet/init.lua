@@ -8,7 +8,6 @@ local MAX_DIST     = 45000
 local MIN_SPEED    = 200
 local BULLET_DMG   = 18      -- M134 7.62mm base damage per round
 local FORCE_MUL    = 3.0
-local HEI_INTERVAL = 0       -- no explosive component on M134
 
 local M134_FIRE_SOUNDS = {
     "lfs/tfre_ac47/m134_shoot.wav",
@@ -30,7 +29,7 @@ for _, s in ipairs(M134_FIRE_SOUNDS) do util.PrecacheSound(s) end
 
 util.AddNetworkString("ac47_m134_projectile")
 
--- ─── Shared projectile store (server reuses same ring buffer pattern) ─────────
+-- ─── Shared projectile store ──────────────────────────────────────────────────
 ac47_m134_store = ac47_m134_store or {
     last_idx           = 0,
     buffer_size        = 128,
@@ -64,13 +63,13 @@ function ENT:Initialize()
     self:SetCollisionGroup(COLLISION_GROUP_NONE)
     self:DrawShadow(false)
 
-    self.Shooter       = self.Firer or NULL
-    self.MuzzlePos     = self:GetPos()
-    self.BulletDmg     = self.BulletDmg or BULLET_DMG
-    self.SpeedVal      = MUZZLE_VEL
-    self.Dir           = self:GetForward()
-    self.DistTraveled  = 0
-    self.Dead          = false
+    self.Shooter      = self.Firer or NULL
+    self.MuzzlePos    = self:GetPos()
+    self.BulletDmg    = self.BulletDmg or BULLET_DMG
+    self.SpeedVal     = MUZZLE_VEL
+    self.Dir          = self:GetForward()
+    self.DistTraveled = 0
+    self.Dead         = false
 
     -- Broadcast to clients so they can simulate tracer + passby
     net.Start("ac47_m134_projectile")
@@ -84,11 +83,10 @@ end
 function ENT:Think()
     if self.Dead then return end
 
-    local dt  = engine.TickInterval()
-    local vel = self.Dir * self.SpeedVal
+    local dt     = engine.TickInterval()
+    local vel    = self.Dir * self.SpeedVal
     local newPos = self:GetPos() + vel * dt
 
-    -- Trace this step
     local tr = util.TraceLine({
         start  = self:GetPos(),
         endpos = newPos,
@@ -97,7 +95,6 @@ function ENT:Think()
     })
 
     if tr.Hit then
-        -- Impact effects
         local effectData = EffectData()
         effectData:SetOrigin(tr.HitPos)
         effectData:SetNormal(tr.HitNormal)
@@ -108,7 +105,8 @@ function ENT:Think()
             tr.HitPos, 75, math.random(95, 105), 1.0
         )
 
-        if IsValid(tr.Entity) and tr.Entity:IsNPC() or (IsValid(tr.Entity) and tr.Entity:IsPlayer()) then
+        -- Bug fix: operator precedence — must check IsValid before calling methods
+        if IsValid(tr.Entity) and (tr.Entity:IsNPC() or tr.Entity:IsPlayer()) then
             local dmginfo = DamageInfo()
             dmginfo:SetDamage(self.BulletDmg)
             dmginfo:SetDamageType(DMG_BULLET)
