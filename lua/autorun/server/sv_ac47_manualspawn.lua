@@ -5,11 +5,9 @@
 
 if not SERVER then return end
 
--- Both net strings declared here — single source of truth.
+-- Single declaration of this net string (removed duplicate from weapon init).
 util.AddNetworkString("AC47_ManualSpawn")
-util.AddNetworkString("AC47_GiveSWEP")  -- BUG fix: was used in menu but never registered server-side
 
--- ─── Manual spawn from control panel button ──────────────────────────────────
 net.Receive("AC47_ManualSpawn", function(len, ply)
     if not IsValid(ply) then return end
 
@@ -36,35 +34,16 @@ net.Receive("AC47_ManualSpawn", function(len, ply)
         return
     end
 
-    -- Read from server-side ConVars registered in sv_ac47_brain.lua
-    local function gcv(name, default)
-        local cv = GetConVar(name)
-        return cv and cv:GetFloat() or default
-    end
-
     ent:SetVar("CenterPos",    centerPos)
     ent:SetVar("CallDir",      callDir)
-    ent:SetVar("Lifetime",     gcv("npc_ac47_lifetime",  40))
-    ent:SetVar("Speed",        gcv("npc_ac47_speed",     280))
-    ent:SetVar("OrbitRadius",  gcv("npc_ac47_radius",    2800))
-    ent:SetVar("SkyHeightAdd", gcv("npc_ac47_height",    5500))
+    ent:SetVar("Lifetime",     GetConVar("npc_ac47_lifetime"):GetFloat())
+    ent:SetVar("Speed",        GetConVar("npc_ac47_speed"):GetFloat())
+    ent:SetVar("OrbitRadius",  GetConVar("npc_ac47_radius"):GetFloat())
+    ent:SetVar("SkyHeightAdd", GetConVar("npc_ac47_height"):GetFloat())
     ent:SetPos(centerPos)
     ent:SetAngles(callDir:Angle())
     ent:Spawn()
     ent:Activate()
 
     ply:PrintMessage(HUD_PRINTCENTER, "[AC-47 Spooky] Inbound!")
-end)
-
--- ─── Give SWEP from control panel button ─────────────────────────────────────
--- BUG fix: cl_ac47_menu.lua fires AC47_GiveSWEP but this net string
--- was never registered or handled server-side. Added here.
-net.Receive("AC47_GiveSWEP", function(len, ply)
-    if not IsValid(ply) then return end
-    if not IsValid(ply) or not ply:IsAdmin() then
-        ply:PrintMessage(HUD_PRINTCENTER, "[AC-47] Admins only.")
-        return
-    end
-    ply:Give("weapon_ac47_call")
-    ply:PrintMessage(HUD_PRINTCENTER, "[AC-47] SWEP given.")
 end)
