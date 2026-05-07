@@ -1,17 +1,13 @@
 -- ============================================================
 --  AC-47 Spooky — NPC Brain
 --  lua/autorun/sv_ac47_brain.lua
---
---  Mirrors the AC-130 brain exactly.
---  Watches for hostile NPCs, picks a center pos, fires a flare,
---  then spawns ent_ac47_spooky after the configured delay.
 -- ============================================================
 
 if not SERVER then return end
 
 -- ── ConVars ──────────────────────────────────────────────────
 CreateConVar("npc_ac47_enabled",   "1",   FCVAR_ARCHIVE, "Enable automatic AC-47 NPC calls")
-CreateConVar("npc_ac47_chance",    "0.15",FCVAR_ARCHIVE, "Probability per check (0–1)")
+CreateConVar("npc_ac47_chance",    "0.15",FCVAR_ARCHIVE, "Probability per check (0-1)")
 CreateConVar("npc_ac47_interval",  "5",   FCVAR_ARCHIVE, "Seconds between NPC checks")
 CreateConVar("npc_ac47_cooldown",  "60",  FCVAR_ARCHIVE, "Seconds between successful calls")
 CreateConVar("npc_ac47_delay",     "4",   FCVAR_ARCHIVE, "Seconds after flare before plane arrives")
@@ -26,14 +22,13 @@ CreateConVar("npc_ac47_announce",  "0",   FCVAR_ARCHIVE, "Print debug messages")
 -- ── State ────────────────────────────────────────────────────
 local LastCallTime = -math.huge
 
--- NPC classes that count as valid callers (combine)
 local CALLER_CLASSES = {
-    npc_combine_s      = true,
-    npc_metropolice    = true,
-    npc_combinedropship= true,
-    npc_combinegunship = true,
-    npc_strider        = true,
-    npc_hunter         = true,
+    npc_combine_s       = true,
+    npc_metropolice     = true,
+    npc_combinedropship = true,
+    npc_combinegunship  = true,
+    npc_strider         = true,
+    npc_hunter          = true,
 }
 
 local function Dbg(msg)
@@ -42,7 +37,6 @@ local function Dbg(msg)
     end
 end
 
--- Returns true if there is open sky above pos.
 local function HasOpenSky(pos)
     local tr = util.TraceLine({
         start  = pos + Vector(0, 0, 64),
@@ -53,7 +47,6 @@ local function HasOpenSky(pos)
 end
 
 local function SpawnPlane(centerPos, callDir)
-    -- guard: entity must be registered
     if not scripted_ents.GetStored("ent_ac47_spooky") then
         Dbg("ent_ac47_spooky not registered")
         return
@@ -77,7 +70,6 @@ end
 local function FireBombinAC47(centerPos, callDir)
     local delay = GetConVar("npc_ac47_delay"):GetFloat()
 
-    -- Flare (visual cue)
     local flareEnt = ents.Create("env_sprite")
     if IsValid(flareEnt) then
         flareEnt:SetKeyValue("model", "sprites/light_glow02_add.vmt")
@@ -92,16 +84,23 @@ local function FireBombinAC47(centerPos, callDir)
 
     sound.Play("ambient/explosions/explode_3.wav", centerPos, 100, 110, 0.8)
     Dbg("Flare fired, plane in " .. delay .. "s")
-
-    timer.Simple(delay, function()
-        SpawnPlane(centerPos, callDir)
-    end)
+    timer.Simple(delay, function() SpawnPlane(centerPos, callDir) end)
 end
 
 -- ── Main timer ───────────────────────────────────────────────
-timer.Create("ac47_npc_brain", GetConVar("npc_ac47_interval"):GetFloat(), 0, function()
+-- BUG 7 FIX: interval is re-read inside the callback every tick
+-- so changing npc_ac47_interval via the menu takes effect immediately
+-- without needing a map restart. Timer fires on a fast 1s heartbeat;
+-- the actual interval check is done in Lua against CurTime().
+local NextCheckTime = 0
+
+timer.Create("ac47_npc_brain", 1, 0, function()
     if not GetConVar("npc_ac47_enabled"):GetBool() then return end
     local ct = CurTime()
+    if ct < NextCheckTime then return end
+    -- Schedule next check using the CURRENT value of the interval convar.
+    NextCheckTime = ct + GetConVar("npc_ac47_interval"):GetFloat()
+
     if ct - LastCallTime < GetConVar("npc_ac47_cooldown"):GetFloat() then return end
     if math.random() > GetConVar("npc_ac47_chance"):GetFloat() then return end
 
@@ -110,13 +109,11 @@ timer.Create("ac47_npc_brain", GetConVar("npc_ac47_interval"):GetFloat(), 0, fun
     local players = player.GetAll()
     if #players == 0 then return end
 
-    -- Collect valid caller NPCs near a player
     local candidates = {}
     for _, npc in ipairs(ents.GetAll()) do
         if not IsValid(npc) or not npc:IsNPC() then continue end
         if not CALLER_CLASSES[npc:GetClass()] then continue end
         if not npc:Alive() then continue end
-        -- must be within range of at least one player
         for _, ply in ipairs(players) do
             if not IsValid(ply) or not ply:Alive() then continue end
             local d = npc:GetPos():Distance(ply:GetPos())
@@ -127,10 +124,7 @@ timer.Create("ac47_npc_brain", GetConVar("npc_ac47_interval"):GetFloat(), 0, fun
         end
     end
 
-    if #candidates == 0 then
-        Dbg("No valid callers found")
-        return
-    end
+    if #candidates == 0 then Dbg("No valid callers found") return end
 
     local chosen    = candidates[math.random(#candidates)]
     local centerPos = chosen:GetPos()
@@ -140,7 +134,6 @@ timer.Create("ac47_npc_brain", GetConVar("npc_ac47_interval"):GetFloat(), 0, fun
         return
     end
 
-    -- callDir: from NPC toward nearest player, flattened
     local nearestPly, nearestDist = nil, math.huge
     for _, ply in ipairs(players) do
         if not IsValid(ply) or not ply:Alive() then continue end

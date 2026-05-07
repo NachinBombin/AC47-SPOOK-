@@ -7,7 +7,7 @@ local MUZZLE_VEL = 56000
 local MAX_DIST   = 45000
 local MIN_SPEED  = 200
 
--- ─── Ring buffer (mirrors server) ────────────────────────────────────────────
+-- Ring buffer (mirrors server)
 ac47_m134_store = ac47_m134_store or {
     last_idx           = 0,
     buffer_size        = 128,
@@ -33,16 +33,17 @@ if #ac47_m134_store.buffer == 0 then
     end
 end
 
--- ─── Passby logic ────────────────────────────────────────────────────────────
--- Mirrors ent_bombin_gau_bullet passby exactly, using AC47EmitSound from the
--- autorun file. Distance thresholds tuned for a smaller-caliber gun.
-
-local AC47_PASSBY_COOLDOWN     = 0.18   -- slightly tighter burst cap vs GAU
+-- Passby constants
+local AC47_PASSBY_COOLDOWN     = 0.18
 local AC47_MAX_CONSIDER_DISTSQ = 3500 * 3500
-
-local ac47_passby_last_time = -99
+local ac47_passby_last_time    = -99
 
 local function ac47_passby_emit(distance, position)
+    -- BUG 2 FIX: AC47EmitSound is defined in autorun/client/cl_ac47_passby_sounds.lua
+    -- which may not be loaded yet when this entity cl_init runs on a listen server.
+    -- Guard against nil to prevent a hard Lua error breaking the tracer system.
+    if not AC47EmitSound then return end
+
     if distance < 256 then
         AC47EmitSound("ac47_passby_close", position)
     elseif distance < 768 then
@@ -84,7 +85,6 @@ local function ac47_check_passby(proj)
     if (dx*dx + dy*dy + dz*dz) > AC47_MAX_CONSIDER_DISTSQ then return end
 
     local vn = proj.dir
-
     local sign_old = lateral_sign(proj.old_pos, listen_pos, vn)
     local sign_new = lateral_sign(proj.pos,     listen_pos, vn)
 
@@ -92,7 +92,6 @@ local function ac47_check_passby(proj)
         proj.ac47_wizz = true
         return
     end
-
     if sign_new > 0 then return end
 
     proj.ac47_wizz = true
@@ -105,8 +104,7 @@ local function ac47_check_passby(proj)
     ac47_passby_emit(dist, closest_pos)
 end
 
--- ─── Net receive ─────────────────────────────────────────────────────────────
-
+-- Net receive
 net.Receive("ac47_m134_projectile", function()
     local pos = net.ReadVector()
     local dir = net.ReadVector()
@@ -132,8 +130,7 @@ net.Receive("ac47_m134_projectile", function()
     store.active_projectiles[#store.active_projectiles + 1] = proj
 end)
 
--- ─── Movement + passby tick ──────────────────────────────────────────────────
-
+-- Movement + passby tick
 local tick_interval = engine.TickInterval()
 local last_tick     = engine.TickCount()
 
@@ -155,11 +152,9 @@ local function ac47_move_cl()
             proj.vel      = step
             proj.pos      = new_pos
             proj.distance_traveled = proj.distance_traveled + step:Length()
-
             if not proj.ac47_wizz then
                 ac47_check_passby(proj)
             end
-
             idx = idx + 1
         end
     end
@@ -173,10 +168,7 @@ hook.Add("CreateMove", "ac47_m134_move_cl", function()
     end
 end)
 
--- ─── Renderer ────────────────────────────────────────────────────────────────
--- M134 tracer: thinner and slightly dimmer than the 30mm GAU tracer,
--- yellow-white core (7.62 tracer colour).
-
+-- Renderer
 local function ac47_render_projectiles()
     local active = ac47_m134_store.active_projectiles
     local count  = #active
@@ -222,10 +214,8 @@ local function ac47_render_projectiles()
 
         render.SetMaterial(mat_beam)
         if render_pos:DistToSqr(tail_end) > 4 then
-            -- Thin bright core: yellow-white
             render.DrawBeam(tail_end, render_pos, 5 * scale, 0, 1, Color(255, 255, 200, 255))
         end
-        -- Outer glow: warm orange (same family as GAU but smaller)
         render.DrawBeam(tail_end, render_pos, 14 * scale, 0, 1, Color(255, 140, 20, 100))
 
         render.SetMaterial(mat_glow)

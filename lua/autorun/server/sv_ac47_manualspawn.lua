@@ -5,12 +5,12 @@
 
 if not SERVER then return end
 
+-- Single declaration of this net string (removed duplicate from weapon init).
 util.AddNetworkString("AC47_ManualSpawn")
 
 net.Receive("AC47_ManualSpawn", function(len, ply)
     if not IsValid(ply) then return end
 
-    -- Trace from player eyepos along look dir to find spawn center
     local tr = util.TraceLine({
         start  = ply:EyePos(),
         endpos = ply:EyePos() + ply:EyeAngles():Forward() * 3000,
@@ -34,6 +34,7 @@ net.Receive("AC47_ManualSpawn", function(len, ply)
         return
     end
 
+    -- Read from ConVars so menu sliders are respected.
     ent:SetVar("CenterPos",    centerPos)
     ent:SetVar("CallDir",      callDir)
     ent:SetVar("Lifetime",     GetConVar("npc_ac47_lifetime"):GetFloat())
