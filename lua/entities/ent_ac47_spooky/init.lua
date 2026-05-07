@@ -27,6 +27,9 @@ util.PrecacheSound("lfs/tfre_ac47/skytrain_engine_far.wav")
 -- ============================================================
 
 util.AddNetworkString("ac47_plane_damage_tier")
+
+-- ac47_plane_spatial_sound: declared here, receiver in bullet cl_init.lua.
+-- Extra field: entIndex (UInt 16) appended so client can manage loop lifetime.
 util.AddNetworkString("ac47_plane_spatial_sound")
 
 -- ============================================================
@@ -39,13 +42,9 @@ local VOL_FALLOFF_EXP = 0.01
 local NEAR_OFFSET     = 40
 local WEAPON_LEVEL    = 150
 
--- BUG-E FIX: pending_sounds was a module-level upvalue shared
--- across ALL plane instances. OnRemove of one plane wiped every
--- other plane's queued sounds. Now stored per-instance as
--- self.pending_sounds, initialised in Initialize().
-
 function ENT:EmitSpatialSound(soundPath, originPos, soundLevel, pitch, baseVol)
-    local sendAt = CurTime()
+    local sendAt   = CurTime()
+    local entIndex = self:EntIndex()
     for _, ply in ipairs(player.GetAll()) do
         if not IsValid(ply) then continue end
         local plyPos  = ply:GetPos()
@@ -69,6 +68,7 @@ function ENT:EmitSpatialSound(soundPath, originPos, soundLevel, pitch, baseVol)
             level     = soundLevel,
             pitch     = pitch,
             volume    = vol,
+            entIndex  = entIndex,
         }
     end
 end
@@ -80,12 +80,14 @@ function ENT:FlushPendingSounds()
     for _, entry in ipairs(self.pending_sounds) do
         if ct >= entry.sendTime then
             if IsValid(entry.ply) then
+                -- FIX: write entIndex so client can manage ambient loop lifetime.
                 net.Start("ac47_plane_spatial_sound")
                     net.WriteString(entry.soundPath)
                     net.WriteVector(entry.nearPos)
                     net.WriteUInt(entry.level, 8)
                     net.WriteUInt(entry.pitch, 8)
                     net.WriteFloat(entry.volume)
+                    net.WriteUInt(entry.entIndex, 16)
                 net.Send(entry.ply)
             end
         else
@@ -105,8 +107,8 @@ local MUZZLE_POINTS = {
     Vector(-259, 66, 85.6),
 }
 
-local PROP_BONES    = { 25, 26 }
-local GUN_BONES     = { 22, 23, 24 }
+local PROP_BONES = { 25, 26 }
+local GUN_BONES  = { 22, 23, 24 }
 
 local BURST_DELAY          = 0.033
 local BURST_COUNT          = 40
@@ -120,10 +122,13 @@ local PEACEFUL_MAX         = 7
 local WEAPON_WINDOW        = 10
 local SPRAY_SOUND_DELAY    = 1.2
 local SPRAY_PAUSE_DURATION = 0.5
+-- Fire a muzzle flash every Nth bullet tick during a burst.
+-- BURST_DELAY=0.033 → 30 Hz. Every 4th = ~8 Hz flash rate.
+local MUZZLE_FLASH_EVERY   = 4
 
 local PROP_DEGS_PER_TICK = 36000 * engine.TickInterval()
-local GUN_BARREL_STEP = 35
-local CTRL_SMOOTH = 10
+local GUN_BARREL_STEP    = 35
+local CTRL_SMOOTH        = 10
 
 -- ============================================================
 -- ENT PROPERTIES
@@ -149,7 +154,6 @@ end
 -- ============================================================
 
 function ENT:Initialize()
-    -- BUG-E FIX: per-instance sound queue
     self.pending_sounds = {}
 
     self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
@@ -219,16 +223,10 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
-    self.EngineRPM4 = CreateSound(self, "lfs/tfre_ac47/skytrain_engine_4rpm.wav")
-    if self.EngineRPM4 then
-        self.EngineRPM4:SetSoundLevel(125)
-        self.EngineRPM4:PlayEx(1.0, 100)
-    end
-    self.EngineDist = CreateSound(self, "lfs/tfre_ac47/skytrain_engine_far.wav")
-    if self.EngineDist then
-        self.EngineDist:SetSoundLevel(125)
-        self.EngineDist:PlayEx(0.6, 100)
-    end
+    -- Engine sounds: use EmitSpatialSound so they go through the
+    -- spatial system and are managed client-side by ac47_ambient_loops.
+    self:EmitSpatialSound("lfs/tfre_ac47/skytrain_engine_4rpm.wav", self:GetPos(), 125, 100, 1.0)
+    self:EmitSpatialSound("lfs/tfre_ac47/skytrain_engine_far.wav",  self:GetPos(), 125, 100, 0.6)
     self:EmitSound("lfs/tfre_ac47/skytrain_engine_start.wav", 125, 100, 1.0)
 
     self.PropAngle     = 0
@@ -238,20 +236,20 @@ function ENT:Initialize()
     local ct = CurTime()
     for i = 1, 3 do
         self.Guns[i] = {
-            MuzzleIndex     = i,
-            IsPeaceful      = true,
-            PeacefulUntil   = ct + math.Rand(0, PEACEFUL_MAX) * (i - 1),
-            PendingWeapon   = nil,
-            CurrentWeapon   = nil,
-            WeaponWindowEnd = 0,
-            BurstTimes      = {},
-            ActiveBursts    = {},
-            SweepStart      = nil,
-            SweepEnd        = nil,
-            NextShotTime    = 0,
-            NextSoundTime   = 0,
-            SprayBurstEnd   = 0,
-            SprayBulletCount= 0,
+            MuzzleIndex      = i,
+            IsPeaceful       = true,
+            PeacefulUntil    = ct + math.Rand(0, PEACEFUL_MAX) * (i - 1),
+            PendingWeapon    = nil,
+            CurrentWeapon    = nil,
+            WeaponWindowEnd  = 0,
+            BurstTimes       = {},
+            ActiveBursts     = {},
+            SweepStart       = nil,
+            SweepEnd         = nil,
+            NextShotTime     = 0,
+            NextSoundTime    = 0,
+            SprayBurstEnd    = 0,
+            SprayBulletCount = 0,
             AimOffset = Vector(
                 math.Rand(-120, 120),
                 math.Rand(-120, 120),
@@ -302,7 +300,7 @@ end
 function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
-    self:StopEngineSounds()
+    -- BroadcastDamageTier(0) stops client ambient loops via ac47_plane_damage_tier net.Receive
     self:BroadcastDamageTier(0)
     local pos = self.LastPos or self:GetPos()
     local function boom(p, sc)
@@ -324,8 +322,9 @@ function ENT:DestroyPlane()
 end
 
 function ENT:StopEngineSounds()
-    if self.EngineRPM4 then self.EngineRPM4:Stop() self.EngineRPM4 = nil end
-    if self.EngineDist then self.EngineDist:Stop() self.EngineDist  = nil end
+    -- Server-side engine sound handles removed in favour of
+    -- EmitSpatialSound + client ac47_ambient_loops management.
+    -- Nothing to stop here; clients handle it via EntityRemoved hook.
 end
 
 -- ============================================================
@@ -407,7 +406,7 @@ function ENT:PhysicsUpdate(phys)
     self:ManipulateBoneAngles(25, propAng)
     self:ManipulateBoneAngles(26, propAng)
 
-    local smooth = CTRL_SMOOTH * ft
+    local smooth    = CTRL_SMOOTH * ft
     local ctrlPitch = self.SmoothedPitch * 0.12
     local ctrlRoll  = -self.SmoothedRoll
     local ctrlYaw   = rawYawDelta * 25
@@ -516,6 +515,10 @@ function ENT:UpdateGunBurst(gunIdx, ct)
             burst.bulletsFired = burst.bulletsFired + 1
             burst.nextTime     = ct + BURST_DELAY
             self:FireGunBullet(gunIdx, burst)
+            -- Per-round muzzle flash at every Nth bullet (8 Hz at 30 Hz fire rate)
+            if burst.bulletsFired % MUZZLE_FLASH_EVERY == 0 then
+                self:SpawnGunMuzzleFX(gunIdx)
+            end
             if burst.bulletsFired >= BURST_COUNT then
                 table.remove(active, idx)
             end
@@ -535,7 +538,7 @@ function ENT:StartGunBurst(gunIdx, targetPos)
     self.GunBarrelStep[gunIdx] = (self.GunBarrelStep[gunIdx] + GUN_BARREL_STEP) % 360
     self:ManipulateBoneAngles(GUN_BONES[gunIdx], Angle(self.GunBarrelStep[gunIdx], 0, 0))
 
-    self:SpawnGunMuzzleFX(gunIdx)
+    self:SpawnGunMuzzleFX(gunIdx)  -- burst-start flash
     self:EmitSpatialSound(
         M134_FIRE_SOUNDS[math.random(#M134_FIRE_SOUNDS)],
         self.CenterPos, WEAPON_LEVEL, math.random(96, 104), 1.0
@@ -574,6 +577,10 @@ function ENT:UpdateGunSpray(gunIdx, ct)
     if ct < g.NextShotTime   then return end
     g.NextShotTime     = ct + BURST_DELAY
     g.SprayBulletCount = g.SprayBulletCount + 1
+    -- Per-round muzzle flash during spray bursts
+    if g.SprayBulletCount % MUZZLE_FLASH_EVERY == 0 then
+        self:SpawnGunMuzzleFX(gunIdx)
+    end
     local muzzlePos = self:LocalToWorld(MUZZLE_POINTS[g.MuzzleIndex])
     local targetPos = self:GetGunTargetPos(gunIdx)
     self:FireM134BulletAt(muzzlePos, targetPos + Vector(
@@ -585,27 +592,19 @@ end
 
 -- ============================================================
 -- TARGETING
--- BUG-C FIX: Disposition(Entity(1)) checked the WORLD entity
--- (Entity(1) == game.GetWorld()), not a player. Every NPC
--- returns D_NU against the world, so the NPC scan always
--- returned nothing. Fixed: resolve a live player for the check.
 -- ============================================================
 
 function ENT:GetPrimaryTarget()
     local closest, closestDist = nil, math.huge
-
     for _, ply in ipairs(player.GetAll()) do
         if not IsValid(ply) or not ply:Alive() then continue end
         local d = ply:GetPos():DistToSqr(self.CenterPos)
         if d < closestDist then closestDist = d closest = ply end
     end
-
-    -- BUG-C FIX: use a real live player for disposition check
     local refPlayer = nil
     for _, ply in ipairs(player.GetAll()) do
         if IsValid(ply) and ply:Alive() then refPlayer = ply break end
     end
-
     if refPlayer then
         for _, npc in ipairs(ents.FindInSphere(self.CenterPos, 8000)) do
             if not IsValid(npc) or not npc:IsNPC() then continue end
@@ -614,12 +613,11 @@ function ENT:GetPrimaryTarget()
             if d < closestDist then closestDist = d closest = npc end
         end
     end
-
     return closest
 end
 
 -- ============================================================
--- MUZZLE FX
+-- MUZZLE FX  (scale 0.2 per user spec)
 -- ============================================================
 
 function ENT:SpawnGunMuzzleFX(gunIdx)
@@ -627,12 +625,12 @@ function ENT:SpawnGunMuzzleFX(gunIdx)
     local worldPos = self:LocalToWorld(MUZZLE_POINTS[g.MuzzleIndex])
     local ang      = self:GetAngles()
     local ed = EffectData()
-    ed:SetOrigin(worldPos) ed:SetAngles(ang) ed:SetScale(0.6)
+    ed:SetOrigin(worldPos) ed:SetAngles(ang) ed:SetScale(0.2)
     util.Effect("cball_explode", ed, true, true)
     for _ = 1, 2 do
         local sp = EffectData()
         sp:SetOrigin(worldPos + Vector(math.Rand(-3,3), math.Rand(-3,3), 0))
-        sp:SetNormal(ang:Up()) sp:SetScale(0.6) sp:SetMagnitude(0.6) sp:SetRadius(5)
+        sp:SetNormal(ang:Up()) sp:SetScale(0.2) sp:SetMagnitude(0.2) sp:SetRadius(2)
         util.Effect("ManhackSparks", sp, true, true)
     end
 end
@@ -677,6 +675,5 @@ end
 
 function ENT:OnRemove()
     self:StopEngineSounds()
-    -- BUG-E FIX: clear only THIS instance's sound queue, not a shared global
     self.pending_sounds = {}
 end

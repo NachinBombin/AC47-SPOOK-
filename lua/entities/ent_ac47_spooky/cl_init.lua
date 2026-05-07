@@ -5,13 +5,12 @@ game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
 -- ============================================================
--- WEAPON SOUNDS  (spatial, per-player delayed)
--- NOTE: net.Receive("ac47_plane_spatial_sound") intentionally
--- NOT registered here. The single authoritative receiver with
--- AC47EmitSound nil-guard lives in
--- ent_ac47_m134_bullet/cl_init.lua.
--- GMod only keeps the LAST registered net.Receive per string;
--- a second registration here would silently kill that handler.
+-- AMBIENT LOOP TABLE (shared with bullet cl_init via global)
+-- Plane engine sounds are started server-side via EmitSpatialSound
+-- and managed client-side via ac47_ambient_loops[entIndex].
+-- The net.Receive for "ac47_plane_spatial_sound" lives in
+-- ent_ac47_m134_bullet/cl_init.lua which always loads first.
+-- We only need the damage-tier net.Receive here for FX.
 -- ============================================================
 
 -- ============================================================
@@ -108,6 +107,14 @@ net.Receive("ac47_plane_damage_tier", function()
     local ent      = Entity(entIndex)
 
     AC47TrailSystem_SetTier(entIndex, tier)
+
+    -- Stop ambient loop on destroy (tier 0)
+    if tier == 0 then
+        ac47_ambient_loops = ac47_ambient_loops or {}
+        local snd = ac47_ambient_loops[entIndex]
+        if snd then snd:Stop() end
+        ac47_ambient_loops[entIndex] = nil
+    end
 
     local state = PlaneStates[entIndex]
     if not state then
