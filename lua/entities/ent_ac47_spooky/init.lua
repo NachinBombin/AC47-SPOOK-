@@ -7,13 +7,11 @@ include("shared.lua")
 -- SOUNDS
 -- ============================================================
 
-local M134_FIRE_SOUNDS = {
-    "lfs/tfre_ac47/m134_shoot.wav",
-}
+local M134_FIRE_SOUND = "lfs/tfre_ac47/m134_shoot.wav"
 local M134_STOP_SOUND = "lfs/tfre_ac47/m134_stop.wav"
 
-util.PrecacheSound("lfs/tfre_ac47/m134_shoot.wav")
-util.PrecacheSound("lfs/tfre_ac47/m134_stop.wav")
+util.PrecacheSound(M134_FIRE_SOUND)
+util.PrecacheSound(M134_STOP_SOUND)
 util.PrecacheSound("lfs/tfre_ac47/skytrain_engine_start.wav")
 util.PrecacheSound("lfs/tfre_ac47/skytrain_engine_stop.wav")
 util.PrecacheSound("lfs/tfre_ac47/skytrain_engine_1rpm.wav")
@@ -27,14 +25,15 @@ util.PrecacheSound("lfs/tfre_ac47/skytrain_engine_far.wav")
 -- ============================================================
 
 util.AddNetworkString("ac47_plane_damage_tier")
-
--- ac47_plane_spatial_sound: one-shot and loop engine sounds delivered per-
--- player with propagation delay. Receiver lives in bullet cl_init.lua which
--- is always loaded before the plane entity is ever seen.
 util.AddNetworkString("ac47_plane_spatial_sound")
 
+-- ac47_gun_sound: tells clients to start or stop the m134 loop on a specific gun.
+-- Payload: UInt16 entIndex, UInt8 gunIdx (1-3), Bool isStart
+-- The client uses CreateSound so it holds a stoppable handle.
+util.AddNetworkString("ac47_gun_sound")
+
 -- ============================================================
--- SPATIAL SOUND SYSTEM (mirrors EmitSpatialSound in AC-130 init.lua exactly)
+-- SPATIAL SOUND SYSTEM
 -- ============================================================
 
 local SOUND_SPEED     = 8200
@@ -95,6 +94,17 @@ function ENT:FlushPendingSounds()
         end
     end
     self.pending_sounds = keep
+end
+
+-- Send start/stop for the m134 loop sound to all clients.
+-- isStart=true  → clients call CreateSound():PlayEx()
+-- isStart=false → clients call :Stop() and nil the handle
+function ENT:BroadcastGunSound(gunIdx, isStart)
+    net.Start("ac47_gun_sound")
+        net.WriteUInt(self:EntIndex(), 16)
+        net.WriteUInt(gunIdx, 8)
+        net.WriteBool(isStart)
+    net.Broadcast()
 end
 
 -- ============================================================
@@ -227,6 +237,10 @@ function ENT:Initialize()
     self.PropAngle     = 0
     self.GunBarrelStep = { 0, 0, 0 }
 
+    -- GunFiring[gunIdx] = true while the burst/spray is playing a fire sound.
+    -- Used to gate BroadcastGunSound(stop) so we only send stop once per burst.
+    self.GunFiring = { false, false, false }
+
     self.Guns = {}
     local ct = CurTime()
     for i = 1, 3 do
@@ -292,9 +306,20 @@ function ENT:OnTakeDamage(dmginfo)
     if hp <= 0 then self:DestroyPlane() end
 end
 
+function ENT:StopAllGunSounds()
+    if not self.GunFiring then return end
+    for i = 1, 3 do
+        if self.GunFiring[i] then
+            self.GunFiring[i] = false
+            self:BroadcastGunSound(i, false)
+        end
+    end
+end
+
 function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
+    self:StopAllGunSounds()
     self:BroadcastDamageTier(0)
     local pos = self.LastPos or self:GetPos()
     local function boom(p, sc)
@@ -316,9 +341,6 @@ function ENT:DestroyPlane()
 end
 
 function ENT:StopEngineSounds()
-    -- FIX #3: broadcast tier 0 so the client EntityRemoved hook in
-    -- cl_init.lua actually fires the ambient loop stop. Without this
-    -- the engine loop keeps playing after the plane is removed.
     self:BroadcastDamageTier(0)
 end
 
@@ -332,7 +354,11 @@ function ENT:Think()
         return true
     end
     local ct = CurTime()
-    if ct >= self.DieTime then self:Remove() return end
+    if ct >= self.DieTime then
+        self:StopAllGunSounds()
+        self:Remove()
+        return
+    end
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
     self:FlushPendingSounds()
@@ -426,6 +452,11 @@ function ENT:HandleGunWindow(gunIdx, ct)
     local g = self.Guns[gunIdx]
     if not g then return end
     if g.IsPeaceful then
+        -- Gun went peaceful: stop its fire sound if still playing
+        if self.GunFiring[gunIdx] then
+            self.GunFiring[gunIdx] = false
+            self:BroadcastGunSound(gunIdx, false)
+        end
         if ct >= g.PeacefulUntil then
             g.IsPeaceful = false
             self:ArmGun(gunIdx, g.PendingWeapon, ct)
@@ -443,6 +474,11 @@ end
 
 function ENT:EnterGunPeaceful(gunIdx, ct)
     local g = self.Guns[gunIdx]
+    -- Stop fire sound when entering peaceful
+    if self.GunFiring[gunIdx] then
+        self.GunFiring[gunIdx] = false
+        self:BroadcastGunSound(gunIdx, false)
+    end
     g.CurrentWeapon  = nil
     g.IsPeaceful     = true
     g.PeacefulUntil  = ct + math.Rand(PEACEFUL_MIN, PEACEFUL_MAX)
@@ -467,7 +503,6 @@ function ENT:ArmGun(gunIdx, weapon, ct)
         g.NextShotTime     = ct
         g.NextSoundTime    = ct
         g.SprayBulletCount = 0
-        -- FIX #5: block bullets until after the first sound fires
         g.SprayBurstEnd    = ct + SPRAY_SOUND_DELAY
         local sweepDir = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
         if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1, 0, 0) end
@@ -505,6 +540,7 @@ function ENT:UpdateGunBurst(gunIdx, ct)
         end
     end
     local active = g.ActiveBursts
+    local anyActive = false
     for idx = #active, 1, -1 do
         local burst = active[idx]
         if not burst then table.remove(active, idx) continue end
@@ -517,8 +553,17 @@ function ENT:UpdateGunBurst(gunIdx, ct)
             end
             if burst.bulletsFired >= BURST_COUNT then
                 table.remove(active, idx)
+            else
+                anyActive = true
             end
+        else
+            anyActive = true
         end
+    end
+    -- Stop fire sound once all bursts in this window are exhausted
+    if not anyActive and self.GunFiring[gunIdx] then
+        self.GunFiring[gunIdx] = false
+        self:BroadcastGunSound(gunIdx, false)
     end
 end
 
@@ -533,14 +578,13 @@ function ENT:StartGunBurst(gunIdx, targetPos)
 
     self.GunBarrelStep[gunIdx] = (self.GunBarrelStep[gunIdx] + GUN_BARREL_STEP) % 360
     self:ManipulateBoneAngles(GUN_BONES[gunIdx], Angle(self.GunBarrelStep[gunIdx], 0, 0))
-
     self:SpawnGunMuzzleFX(gunIdx)
-    -- Spatial fire sound: one-shot heard at the position of the muzzle
-    local muzzleWorld = self:LocalToWorld(MUZZLE_POINTS[g.MuzzleIndex])
-    self:EmitSpatialSound(
-        M134_FIRE_SOUNDS[math.random(#M134_FIRE_SOUNDS)],
-        muzzleWorld, WEAPON_LEVEL, math.random(96, 104), 1.0
-    )
+
+    -- Start the fire sound loop on clients (only if not already playing)
+    if not self.GunFiring[gunIdx] then
+        self.GunFiring[gunIdx] = true
+        self:BroadcastGunSound(gunIdx, true)
+    end
 end
 
 function ENT:FireGunBullet(gunIdx, burst)
@@ -558,22 +602,36 @@ end
 
 function ENT:UpdateGunSpray(gunIdx, ct)
     local g = self.Guns[gunIdx]
-    if ct >= g.WeaponWindowEnd then return end
+    if ct >= g.WeaponWindowEnd then
+        -- Window ended: stop sound
+        if self.GunFiring[gunIdx] then
+            self.GunFiring[gunIdx] = false
+            self:BroadcastGunSound(gunIdx, false)
+        end
+        return
+    end
     if g.NextSoundTime > 0 and ct >= g.NextSoundTime then
-        local muzzleWorld = self:LocalToWorld(MUZZLE_POINTS[g.MuzzleIndex])
-        self:EmitSpatialSound(
-            M134_FIRE_SOUNDS[math.random(#M134_FIRE_SOUNDS)],
-            muzzleWorld, WEAPON_LEVEL, math.random(96, 104), 1.0
-        )
         self:SpawnGunMuzzleFX(gunIdx)
         self.GunBarrelStep[gunIdx] = (self.GunBarrelStep[gunIdx] + GUN_BARREL_STEP) % 360
         self:ManipulateBoneAngles(GUN_BONES[gunIdx], Angle(self.GunBarrelStep[gunIdx], 0, 0))
         g.SprayBurstEnd = ct + (SPRAY_SOUND_DELAY - SPRAY_PAUSE_DURATION)
         g.NextShotTime  = ct
         g.NextSoundTime = ct + SPRAY_SOUND_DELAY
+        -- Start fire loop if not already going
+        if not self.GunFiring[gunIdx] then
+            self.GunFiring[gunIdx] = true
+            self:BroadcastGunSound(gunIdx, true)
+        end
     end
-    if ct >= g.SprayBurstEnd then return end
-    if ct < g.NextShotTime   then return end
+    -- Stop between spray pulses
+    if ct >= g.SprayBurstEnd then
+        if self.GunFiring[gunIdx] then
+            self.GunFiring[gunIdx] = false
+            self:BroadcastGunSound(gunIdx, false)
+        end
+        return
+    end
+    if ct < g.NextShotTime then return end
     g.NextShotTime     = ct + BURST_DELAY
     g.SprayBulletCount = g.SprayBulletCount + 1
     if g.SprayBulletCount % MUZZLE_FLASH_EVERY == 0 then
@@ -634,24 +692,16 @@ function ENT:SpawnGunMuzzleFX(gunIdx)
 end
 
 -- ============================================================
--- BULLET SPAWN — mirrors bombin_gau_spawn call site in AC-130 init.lua.
--- NO per-bullet entity is created here. ac47_m134_spawn() handles the
--- shared projectile store and sends the net message to clients directly.
--- The ent_ac47_m134_bullet entity definition still exists so the game
--- doesn't error on missing entity class, but its Initialize() is never
--- reached from this path.
+-- BULLET SPAWN
 -- ============================================================
 
 function ENT:FireM134BulletAt(muzzlePos, impactPos)
     local dir = impactPos - muzzlePos
     if dir:LengthSqr() < 1 then return end
     dir:Normalize()
-    -- ac47_m134_spawn is defined in ent_ac47_m134_bullet/init.lua which is
-    -- always loaded (SERVER) before any plane entity is spawned.
     if ac47_m134_spawn then
         ac47_m134_spawn(self, self, muzzlePos, dir, BULLET_DAMAGE, nil)
     else
-        -- Fallback: should never happen in normal load order, but guard anyway.
         self:Debug("WARN: ac47_m134_spawn not available — bullet skipped")
     end
 end
@@ -677,6 +727,7 @@ function ENT:FindGround(centerPos)
 end
 
 function ENT:OnRemove()
+    self:StopAllGunSounds()
     self:StopEngineSounds()
     self.pending_sounds = {}
 end

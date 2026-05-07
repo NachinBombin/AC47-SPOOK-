@@ -1,20 +1,59 @@
 include("shared.lua")
 include("cl_trailsystem.lua")
 
--- FIX: declare before net.Receive handler uses it (tier-0 engine loop cleanup)
 ac47_ambient_loops = ac47_ambient_loops or {}
 
 game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
 -- ============================================================
--- AMBIENT LOOP TABLE (shared with bullet cl_init via global)
--- Plane engine sounds are started server-side via EmitSpatialSound
--- and managed client-side via ac47_ambient_loops[entIndex].
--- The net.Receive for "ac47_plane_spatial_sound" lives in
--- ent_ac47_m134_bullet/cl_init.lua which always loads first.
--- We only need the damage-tier net.Receive here for FX.
+-- GUN FIRE SOUND HANDLES
+-- ac47_gun_loops[entIndex][gunIdx] = CSoundPatch handle
+-- Created via CreateSound so they can be stopped cleanly.
+-- NEVER use sound.Play for the m134_shoot.wav loop file.
 -- ============================================================
+
+local M134_FIRE_SOUND = "lfs/tfre_ac47/m134_shoot.wav"
+local ac47_gun_loops  = {}
+
+net.Receive("ac47_gun_sound", function()
+    local entIndex = net.ReadUInt(16)
+    local gunIdx   = net.ReadUInt(8)
+    local isStart  = net.ReadBool()
+
+    if isStart then
+        local ent = Entity(entIndex)
+        if not IsValid(ent) then return end
+        ac47_gun_loops[entIndex]          = ac47_gun_loops[entIndex] or {}
+        -- Only create if not already playing
+        if ac47_gun_loops[entIndex][gunIdx] then return end
+        local snd = CreateSound(ent, M134_FIRE_SOUND)
+        if snd then
+            snd:PlayEx(1.0, 100)
+            ac47_gun_loops[entIndex][gunIdx] = snd
+        end
+    else
+        if not ac47_gun_loops[entIndex] then return end
+        local snd = ac47_gun_loops[entIndex][gunIdx]
+        if snd then
+            snd:Stop()
+            ac47_gun_loops[entIndex][gunIdx] = nil
+        end
+    end
+end)
+
+-- Clean up all gun sound handles when the plane entity is removed
+hook.Add("EntityRemoved", "ac47_gun_loop_cleanup", function(ent)
+    if not IsValid(ent) then return end
+    local idx   = ent:EntIndex()
+    local slots = ac47_gun_loops[idx]
+    if slots then
+        for _, snd in pairs(slots) do
+            if snd then snd:Stop() end
+        end
+    end
+    ac47_gun_loops[idx] = nil
+end)
 
 -- ============================================================
 -- DAMAGE TIERS
@@ -111,11 +150,18 @@ net.Receive("ac47_plane_damage_tier", function()
 
     AC47TrailSystem_SetTier(entIndex, tier)
 
-    -- Stop ambient loop on destroy (tier 0)
     if tier == 0 then
         local snd = ac47_ambient_loops[entIndex]
         if snd then snd:Stop() end
         ac47_ambient_loops[entIndex] = nil
+        -- Also stop all gun loops in case plane was destroyed mid-burst
+        local slots = ac47_gun_loops[entIndex]
+        if slots then
+            for _, gsnd in pairs(slots) do
+                if gsnd then gsnd:Stop() end
+            end
+        end
+        ac47_gun_loops[entIndex] = nil
     end
 
     local state = PlaneStates[entIndex]
