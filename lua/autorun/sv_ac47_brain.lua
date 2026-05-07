@@ -5,7 +5,7 @@
 
 if not SERVER then return end
 
--- ── ConVars ──────────────────────────────────────────────────
+-- ConVars
 CreateConVar("npc_ac47_enabled",   "1",   FCVAR_ARCHIVE, "Enable automatic AC-47 NPC calls")
 CreateConVar("npc_ac47_chance",    "0.15",FCVAR_ARCHIVE, "Probability per check (0-1)")
 CreateConVar("npc_ac47_interval",  "5",   FCVAR_ARCHIVE, "Seconds between NPC checks")
@@ -19,7 +19,7 @@ CreateConVar("npc_ac47_min_dist",  "0",   FCVAR_ARCHIVE, "Min NPC distance from 
 CreateConVar("npc_ac47_max_dist",  "6000",FCVAR_ARCHIVE, "Max NPC distance from a player to trigger")
 CreateConVar("npc_ac47_announce",  "0",   FCVAR_ARCHIVE, "Print debug messages")
 
--- ── State ────────────────────────────────────────────────────
+-- State
 local LastCallTime = -math.huge
 
 local CALLER_CLASSES = {
@@ -48,8 +48,7 @@ end
 
 local function SpawnPlane(centerPos, callDir)
     if not scripted_ents.GetStored("ent_ac47_spooky") then
-        Dbg("ent_ac47_spooky not registered")
-        return
+        Dbg("ent_ac47_spooky not registered") return
     end
     local ent = ents.Create("ent_ac47_spooky")
     if not IsValid(ent) then Dbg("ents.Create failed") return end
@@ -69,7 +68,6 @@ end
 
 local function FireBombinAC47(centerPos, callDir)
     local delay = GetConVar("npc_ac47_delay"):GetFloat()
-
     local flareEnt = ents.Create("env_sprite")
     if IsValid(flareEnt) then
         flareEnt:SetKeyValue("model", "sprites/light_glow02_add.vmt")
@@ -81,24 +79,33 @@ local function FireBombinAC47(centerPos, callDir)
             if IsValid(flareEnt) then flareEnt:Remove() end
         end)
     end
-
     sound.Play("ambient/explosions/explode_3.wav", centerPos, 100, 110, 0.8)
     Dbg("Flare fired, plane in " .. delay .. "s")
     timer.Simple(delay, function() SpawnPlane(centerPos, callDir) end)
 end
 
--- ── Main timer ───────────────────────────────────────────────
--- BUG 7 FIX: interval is re-read inside the callback every tick
--- so changing npc_ac47_interval via the menu takes effect immediately
--- without needing a map restart. Timer fires on a fast 1s heartbeat;
--- the actual interval check is done in Lua against CurTime().
+-- BUG5 FIX: net string + handler for the give SWEP button in the menu.
+-- Gives weapon_ac47_call to the requesting player (admin-only check).
+util.AddNetworkString("AC47_GiveSWEP")
+net.Receive("AC47_GiveSWEP", function(_, ply)
+    if not IsValid(ply) then return end
+    if not ply:IsAdmin() then
+        ply:ChatPrint("[AC-47] Admin only.")
+        return
+    end
+    ply:Give("weapon_ac47_call")
+    ply:ChatPrint("[AC-47] Given weapon_ac47_call. Aim at a position and LEFT-CLICK.")
+end)
+
+-- Main timer
+-- BUG7 CONFIRMED OK: 1s heartbeat + NextCheckTime pattern means
+-- changing npc_ac47_interval via slider takes effect immediately.
 local NextCheckTime = 0
 
 timer.Create("ac47_npc_brain", 1, 0, function()
     if not GetConVar("npc_ac47_enabled"):GetBool() then return end
     local ct = CurTime()
     if ct < NextCheckTime then return end
-    -- Schedule next check using the CURRENT value of the interval convar.
     NextCheckTime = ct + GetConVar("npc_ac47_interval"):GetFloat()
 
     if ct - LastCallTime < GetConVar("npc_ac47_cooldown"):GetFloat() then return end
