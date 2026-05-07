@@ -5,9 +5,6 @@ include("shared.lua")
 
 -- ============================================================
 -- SOUNDS
--- Sourced directly from tfre_ac47/shared.lua sound.Add entries.
--- Since our NPC plane is always at max RPM, we play RPM4 + DIST.
--- RPM1/2/3 are not needed but are precached defensively.
 -- ============================================================
 
 local M134_FIRE_SOUNDS = {
@@ -99,31 +96,16 @@ end
 -- CONSTANTS
 -- ============================================================
 
--- Muzzle positions in local entity space.
--- Verified against tfre_ac47/init.lua fP table — exact match.
 local MUZZLE_POINTS = {
     Vector(-170, 66, 101.44),
     Vector(-208, 66, 95),
     Vector(-259, 66, 85.6),
 }
 
--- BONE INDEX REFERENCE (from tfre_ac47/cl_init.lua AnimRotor + PrimaryAttack)
---
---   Propeller disc bones : 25, 26   (AnimRotor — these are the spinning prop discs)
---   Gun barrel bones     : 22, 23, 24  (PrimaryAttack — M134 barrel rotation)
---   Aileron bones        : 6, 7
---   Rudder bone          : 3
---   Elevator bones       : 4, 5
---   Landing gear         : 1, 2, 8, 9, 10, 11
---   Cockpit instruments  : 12-19
---
--- Previous version incorrectly applied propeller spin to gun barrel bones (22-24).
--- Fixed: propeller spin → bones 25, 26. Gun barrel step → bones 22, 23, 24.
-local PROP_BONES    = { 25, 26 }       -- engine propeller discs
-local GUN_BONES     = { 22, 23, 24 }   -- M134 barrel rotation per gun index
+local PROP_BONES    = { 25, 26 }
+local GUN_BONES     = { 22, 23, 24 }
 
--- M134 cyclic constants
-local BURST_DELAY          = 0.033   -- ~30 rps
+local BURST_DELAY          = 0.033
 local BURST_COUNT          = 40
 local BULLET_DAMAGE        = 18
 local SWEEP_HALF           = 500
@@ -136,15 +118,8 @@ local WEAPON_WINDOW        = 10
 local SPRAY_SOUND_DELAY    = 1.2
 local SPRAY_PAUSE_DURATION = 0.5
 
--- Propeller spin: always at max RPM.
--- 2900 RPM (ENT.MaxRPM from tfre shared.lua) = 48.3 rps = 17400 deg/s
--- We use 6000 rpm conceptually for visual snap: 36000 deg/s.
 local PROP_DEGS_PER_TICK = 36000 * engine.TickInterval()
-
--- Gun barrel step: one indexed step per burst start (matches PrimaryAttack: NumPrim*35)
 local GUN_BARREL_STEP = 35
-
--- Control surface smoothing factor (matches tfre cl_init.lua: FrameTime() * 10)
 local CTRL_SMOOTH = 10
 
 -- ============================================================
@@ -215,14 +190,12 @@ function ENT:Initialize()
     self:SetAngles(Angle(0, ang.y - 90, 0))
     self.ang = self:GetAngles()
 
-    -- Altitude drift
     self.AltDriftCurrent  = self.sky
     self.AltDriftTarget   = self.sky
     self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
     self.AltDriftRange    = 250
     self.AltDriftLerp     = 0.001
 
-    -- Banking / pitch smoothing
     self.JitterPhase     = math.Rand(0, math.pi * 2)
     self.JitterAmplitude = 4
     self.SmoothedRoll    = 0
@@ -230,7 +203,6 @@ function ENT:Initialize()
     self.SmoothedYaw     = 0
     self.PrevYaw         = self:GetAngles().y
 
-    -- Control surface smoothed values (mirror tfre cl_init.lua smPitch/smYaw/smRoll)
     self.ctrlSmPitch = 0
     self.ctrlSmYaw   = 0
     self.ctrlSmRoll  = 0
@@ -241,9 +213,6 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
-    -- ── Engine sounds ─────────────────────────────────────────
-    -- Always at max RPM: play RPM4 (high RPM layer) + far/distance layer.
-    -- Both loop continuously. Pitch/volume are static since RPM never changes.
     self.EngineRPM4 = CreateSound(self, "lfs/tfre_ac47/skytrain_engine_4rpm.wav")
     if self.EngineRPM4 then
         self.EngineRPM4:SetSoundLevel(125)
@@ -256,13 +225,9 @@ function ENT:Initialize()
     end
     self:EmitSound("lfs/tfre_ac47/skytrain_engine_start.wav", 125, 100, 1.0)
 
-    -- Propeller accumulator (degrees, always spinning at max)
-    self.PropAngle = 0
-
-    -- Gun barrel rotation accumulators (one per gun, stepped on each burst start)
+    self.PropAngle     = 0
     self.GunBarrelStep = { 0, 0, 0 }
 
-    -- ── Three independent gun states ──────────────────────────
     self.Guns = {}
     local ct = CurTime()
     for i = 1, 3 do
@@ -384,8 +349,6 @@ end
 
 -- ============================================================
 -- PHYSICS UPDATE
--- Handles: orbit, altitude drift, banking, propeller spin,
---          control surface bone animation.
 -- ============================================================
 
 function ENT:PhysicsUpdate(phys)
@@ -395,7 +358,6 @@ function ENT:PhysicsUpdate(phys)
     self.LastPos = pos
     local ft = engine.TickInterval()
 
-    -- ── Altitude drift ────────────────────────────────────────
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
@@ -404,7 +366,6 @@ function ENT:PhysicsUpdate(phys)
     self.JitterPhase     = self.JitterPhase + 0.02
     local liveAlt = self.AltDriftCurrent + math.sin(self.JitterPhase) * self.JitterAmplitude
 
-    -- ── Orbit yaw ─────────────────────────────────────────────
     local flatDist = Vector(pos.x - self.CenterPos.x, pos.y - self.CenterPos.y, 0):Length()
     local orbitYaw = 0
     if flatDist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
@@ -419,7 +380,6 @@ function ENT:PhysicsUpdate(phys)
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
 
-    -- ── Banking & pitch ───────────────────────────────────────
     local targetRoll  = math.Clamp(rawYawDelta * -18, -15, 15)
     local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
     self.SmoothedRoll  = Lerp(rollLerp, self.SmoothedRoll,  targetRoll)
@@ -436,35 +396,23 @@ function ENT:PhysicsUpdate(phys)
     ))
     phys:SetVelocity(vel)
 
-    -- ── Propeller spin (bones 25, 26) — always at max RPM ─────
-    -- These are the propeller disc bodygroup bones from AnimRotor.
-    -- Previous code wrongly used bones 22-24 here (those are gun barrels).
     self.PropAngle = (self.PropAngle + PROP_DEGS_PER_TICK) % 360
     local propAng  = Angle(self.PropAngle, 0, 0)
     self:ManipulateBoneAngles(25, propAng)
     self:ManipulateBoneAngles(26, propAng)
 
-    -- ── Control surface bone animation ────────────────────────
-    -- Mirrors tfre_ac47/cl_init.lua AnimFins, driven by our smoothed values.
-    -- smPitch/smYaw/smRoll use the same FrameTime()*10 lerp factor.
     local smooth = CTRL_SMOOTH * ft
-    -- Pitch input: derived from SmoothedPitch (-8..8 deg)
-    local ctrlPitch = self.SmoothedPitch * 0.12   -- scale to match AnimFins range
-    -- Roll input: derived from SmoothedRoll (-15..15 deg)
-    local ctrlRoll  = -self.SmoothedRoll           -- sign matches tfre Roll = -GetRotRoll()
-    -- Yaw: derived from rawYawDelta
+    local ctrlPitch = self.SmoothedPitch * 0.12
+    local ctrlRoll  = -self.SmoothedRoll
     local ctrlYaw   = rawYawDelta * 25
 
     self.ctrlSmPitch = self.ctrlSmPitch + (ctrlPitch - self.ctrlSmPitch) * smooth
     self.ctrlSmYaw   = self.ctrlSmYaw   + (ctrlYaw   - self.ctrlSmYaw)   * smooth
     self.ctrlSmRoll  = self.ctrlSmRoll  + (ctrlRoll  - self.ctrlSmRoll)  * smooth
 
-    -- Ailerons (bones 6, 7): roll axis
     self:ManipulateBoneAngles(6, Angle(-self.ctrlSmRoll, 0, 0))
     self:ManipulateBoneAngles(7, Angle(-self.ctrlSmRoll, 0, 0))
-    -- Rudder (bone 3): yaw axis
     self:ManipulateBoneAngles(3, Angle(self.ctrlSmYaw, 0, 0))
-    -- Elevators (bones 4, 5): pitch axis
     self:ManipulateBoneAngles(4, Angle(0, 0, self.ctrlSmPitch))
     self:ManipulateBoneAngles(5, Angle(0, 0, self.ctrlSmPitch))
 end
@@ -578,8 +526,6 @@ function ENT:StartGunBurst(gunIdx, targetPos)
     g.SweepEnd   = targetPos + sweepDir * SWEEP_HALF
     table.insert(g.ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
 
-    -- Step gun barrel bone for this gun (bones 22, 23, 24 = gun barrel groups)
-    -- Mirrors PrimaryAttack: ManipulateBoneAngles(22/23/24, Angle(NumPrim*35,0,0))
     self.GunBarrelStep[gunIdx] = (self.GunBarrelStep[gunIdx] + GUN_BARREL_STEP) % 360
     self:ManipulateBoneAngles(GUN_BONES[gunIdx], Angle(self.GunBarrelStep[gunIdx], 0, 0))
 
@@ -612,7 +558,6 @@ function ENT:UpdateGunSpray(gunIdx, ct)
             self.CenterPos, WEAPON_LEVEL, math.random(96, 104), 1.0
         )
         self:SpawnGunMuzzleFX(gunIdx)
-        -- Step barrel bone on each spray heartbeat too
         self.GunBarrelStep[gunIdx] = (self.GunBarrelStep[gunIdx] + GUN_BARREL_STEP) % 360
         self:ManipulateBoneAngles(GUN_BONES[gunIdx], Angle(self.GunBarrelStep[gunIdx], 0, 0))
         g.SprayBurstEnd = ct + (SPRAY_SOUND_DELAY - SPRAY_PAUSE_DURATION)
@@ -634,15 +579,31 @@ end
 
 -- ============================================================
 -- TARGETING
+-- BUG4 FIX: scan both players AND hostile NPCs; return closest
+-- threat to the orbit center. Previously only player.GetAll()
+-- was checked, so the plane ignored all NPC enemies.
 -- ============================================================
 
 function ENT:GetPrimaryTarget()
     local closest, closestDist = nil, math.huge
+
+    -- Players
     for _, ply in ipairs(player.GetAll()) do
         if not IsValid(ply) or not ply:Alive() then continue end
         local d = ply:GetPos():DistToSqr(self.CenterPos)
         if d < closestDist then closestDist = d closest = ply end
     end
+
+    -- Hostile NPCs (any NPC that is not on the player's side)
+    -- Relationship D_HT (hate) toward players = enemy NPC.
+    for _, npc in ipairs(ents.FindInSphere(self.CenterPos, 8000)) do
+        if not IsValid(npc) or not npc:IsNPC() then continue end
+        -- Skip friendly / neutral NPCs
+        if npc:Disposition(Entity(1)) ~= D_HT then continue end
+        local d = npc:GetPos():DistToSqr(self.CenterPos)
+        if d < closestDist then closestDist = d closest = npc end
+    end
+
     return closest
 end
 
