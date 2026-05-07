@@ -1,14 +1,10 @@
 -- ============================================================
 -- TRAIL SYSTEM  --  ent_ac47_spooky
--- Exact same structure as AC-130 trail system.
--- Two wingtip trails, tier-driven colour/size.
--- Unique hook/function names prefixed ac47_ to avoid collisions.
 -- ============================================================
 
 local TRAIL_MATERIAL = Material("trails/smoke")
 local SAMPLE_RATE    = 0.025
 
--- AC-47 wingspan is narrower than the AC-130. Adjust X offsets accordingly.
 local TRAIL_POSITIONS = {
     Vector( -200, 15, -4 ),   -- left wingtip
     Vector(  200, 15, -4 ),   -- right wingtip
@@ -23,12 +19,6 @@ local TIER_CONFIG = {
 
 local AC47Trails = {}
 
-function AC47TrailSystem_SetTier(entIndex, tier)
-    local state = AC47Trails[entIndex]
-    if not state then return end
-    state.tier = tier
-end
-
 local function EnsureRegistered(entIndex)
     if AC47Trails[entIndex] then return end
     local trails = {}
@@ -40,6 +30,16 @@ local function EnsureRegistered(entIndex)
         nextSample = 0,
         trails     = trails,
     }
+end
+
+-- FIX BUG 2: EnsureRegistered is called BEFORE the nil-check so that a
+-- damage-tier net message arriving in the same frame the entity is first
+-- seen will correctly record the tier rather than silently dropping it.
+function AC47TrailSystem_SetTier(entIndex, tier)
+    EnsureRegistered(entIndex)   -- was missing; tier was lost if state didn't exist yet
+    local state = AC47Trails[entIndex]
+    if not state then return end
+    state.tier = tier
 end
 
 local function DrawBeam(positions, cfg)

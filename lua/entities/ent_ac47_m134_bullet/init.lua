@@ -2,7 +2,7 @@ AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
--- ─── Constants ─────────────────────────────────────────────────────────────
+-- ─── Constants ───────────────────────────────────────────────────────────────────
 local MUZZLE_VEL = 56000
 local MAX_DIST   = 45000
 local MIN_SPEED  = 200
@@ -23,10 +23,7 @@ local IMPACT_SOUNDS = {
 }
 for _, s in ipairs(IMPACT_SOUNDS) do util.PrecacheSound(s) end
 
--- ─── Shared projectile store (same pattern as bombin_gau_store) ─────────────
--- Declared on the GLOBAL table so both server and client share the same
--- in-process table (single-player) and the client can access it for
--- tracer rendering and passby logic.
+-- ─── Shared projectile store (same pattern as bombin_gau_store) ─────────────────
 ac47_m134_store = ac47_m134_store or {
     last_idx           = 0,
     buffer_size        = 128,
@@ -53,7 +50,10 @@ if #ac47_m134_store.buffer == 0 then
 end
 
 util.AddNetworkString("ac47_m134_projectile")  -- pos + dir → client tracer + passby
-util.AddNetworkString("ac47_bullet_impact")     -- hitPos + hitNormal + sndIdx
+-- FIX BUG 1: ac47_bullet_impact is broadcast-only (client plays the sound).
+-- The server no longer calls sound.Play locally, so the host does NOT hear
+-- the impact twice (once from sound.Play server-side + once from net.Receive).
+util.AddNetworkString("ac47_bullet_impact")
 
 -- ─── Spawn function (mirrors bombin_gau_spawn) ──────────────────────────────
 function ac47_m134_spawn(shooter, firer_ent, pos, dir, damage, blast_radius)
@@ -78,7 +78,7 @@ function ac47_m134_spawn(shooter, firer_ent, pos, dir, damage, blast_radius)
     store.last_idx = store.last_idx + 1
     store.active_projectiles[#store.active_projectiles + 1] = proj
 
-    -- Notify clients: pos + dir (unit vector, same as GAU blueprint)
+    -- Notify clients: pos + dir (unit vector)
     net.Start("ac47_m134_projectile")
         net.WriteVector(pos)
         net.WriteVector(dir)
@@ -97,27 +97,15 @@ local function apply_impact_fx(proj, tr)
 
     util.BlastDamage(attacker, attacker, hitPos, proj.blast_radius, proj.damage)
 
-    local ed = EffectData()
-    ed:SetOrigin(hitPos)
-    ed:SetNormal(tr.HitNormal)
-    ed:SetScale(0.4)
-    ed:SetMagnitude(0.4)
-    ed:SetRadius(8)
-    util.Effect("Sparks", ed, true, true)
-
-    local ed2 = EffectData()
-    ed2:SetOrigin(hitPos)
-    ed2:SetNormal(tr.HitNormal)
-    ed2:SetScale(0.3)
-    util.Effect("ManhackSparks", ed2, true, true)
-
+    -- FIX BUG 1 + WARN 1: broadcast the impact to ALL clients (including host);
+    -- sound.Play is NOT called server-side anymore — only the net message fires.
+    -- Also upgraded to 8-bit sndIdx (was 4-bit, fragile if IMPACT_SOUNDS grows).
+    local sndIdx = math.random(#IMPACT_SOUNDS)
     net.Start("ac47_bullet_impact")
         net.WriteVector(hitPos)
         net.WriteVector(tr.HitNormal)
-        net.WriteUInt(math.random(#IMPACT_SOUNDS), 4)
+        net.WriteUInt(sndIdx, 8)   -- FIX WARN 1: was WriteUInt(..., 4)
     net.Broadcast()
-
-    sound.Play(table.Random(IMPACT_SOUNDS), hitPos, 75, math.random(95, 110), 0.8)
 end
 
 local function apply_damage(proj, tr)

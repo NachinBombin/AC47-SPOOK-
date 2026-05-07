@@ -7,9 +7,7 @@ local MUZZLE_VEL = 56000
 local MAX_DIST   = 45000
 local MIN_SPEED  = 200
 
--- ─── Shared projectile store ─────────────────────────────────────────────────
--- Declared globally so server init.lua and client cl_init.lua share the same
--- table in single-player; in multiplayer the client populates it via net.
+-- ─── Shared projectile store ────────────────────────────────────────────────────────────────
 ac47_m134_store = ac47_m134_store or {
     last_idx           = 0,
     buffer_size        = 128,
@@ -32,13 +30,10 @@ if #ac47_m134_store.buffer == 0 then
     end
 end
 
--- ─── Engine ambient loop table ───────────────────────────────────────────────
--- Keyed by entIndex. Populated by net.Receive("ac47_plane_spatial_sound").
--- Stopped by net.Receive("ac47_plane_damage_tier") tier==0 in plane cl_init.lua.
--- Also cleaned up by EntityRemoved below.
+-- ─── Engine ambient loop table ─────────────────────────────────────────────────────────────
 ac47_ambient_loops = ac47_ambient_loops or {}
 
--- ─── Net: new projectile ─────────────────────────────────────────────────────
+-- ─── Net: new projectile ────────────────────────────────────────────────────────────────────
 net.Receive("ac47_m134_projectile", function()
     local pos = net.ReadVector()
     local dir = net.ReadVector()
@@ -62,10 +57,7 @@ net.Receive("ac47_m134_projectile", function()
     store.active_projectiles[#store.active_projectiles + 1] = proj
 end)
 
--- ─── Net: plane spatial sound → ambient loop management ─────────────────────
--- Engine sounds (loop=true) are started as CSoundPatch on the plane entity.
--- One-shot sounds (loop=false) are played via sound.Play near the player ear.
--- The "is loop" classification is: anything with engine/rpm/far in the path.
+-- ─── Net: plane spatial sound → ambient loop management ───────────────────────────
 net.Receive("ac47_plane_spatial_sound", function()
     local sndPath  = net.ReadString()
     local nearPos  = net.ReadVector()
@@ -74,9 +66,12 @@ net.Receive("ac47_plane_spatial_sound", function()
     local volume   = net.ReadFloat()
     local entIndex = net.ReadUInt(16)
 
-    local isLoop = string.find(sndPath, "engine") or
-                   string.find(sndPath, "rpm")    or
-                   string.find(sndPath, "far")
+    -- FIX WARN 2: previous pattern matched "engine" in "skytrain_engine_stop.wav",
+    -- causing the one-shot stop sound to be treated as a loop.
+    -- Now we only loop sounds with "rpm" or "_far" in the path, which are the
+    -- actual continuous engine loop files. The start/stop sounds are one-shots.
+    local isLoop = string.find(sndPath, "rpm") or
+                   string.find(sndPath, "engine_far")
 
     if isLoop then
         if not ac47_ambient_loops[entIndex] then
@@ -103,7 +98,7 @@ hook.Add("EntityRemoved", "ac47_ambient_loop_cleanup", function(ent)
     ac47_ambient_loops[idx] = nil
 end)
 
--- ─── Passby logic (mirrors gau_check_passby exactly) ─────────────────────────
+-- ─── Passby logic ──────────────────────────────────────────────────────────────────────────
 local M134_PASSBY_COOLDOWN     = 0.22
 local M134_MAX_CONSIDER_DISTSQ = 4000 * 4000
 local m134_passby_last_time    = -99
@@ -162,7 +157,7 @@ local function m134_check_passby(proj)
     m134_passby_emit(dist, closest_pos)
 end
 
--- ─── Client movement tick (mirrors bombin_gau_move_cl via CreateMove) ────────
+-- ─── Client movement tick ──────────────────────────────────────────────────────────────────
 local tick_interval = engine.TickInterval()
 local last_tick     = engine.TickCount()
 
@@ -200,7 +195,7 @@ hook.Add("CreateMove", "ac47_m134_move_cl", function()
     end
 end)
 
--- ─── Tracer renderer (mirrors bombin_gau render exactly) ─────────────────────
+-- ─── Tracer renderer ────────────────────────────────────────────────────────────────────────
 local function render_projectiles()
     local active = ac47_m134_store.active_projectiles
     local count  = #active
@@ -261,11 +256,11 @@ hook.Add("PostDrawTranslucentRenderables", "ac47_m134_render", function(depth, s
     render_projectiles()
 end)
 
--- ─── Impact FX (client-side: decal + ricochet + sound) ───────────────────────
+-- ─── Impact FX (client-side: decal + ricochet + sound) ───────────────────────────────
 net.Receive("ac47_bullet_impact", function()
     local hitPos    = net.ReadVector()
     local hitNormal = net.ReadVector()
-    local sndIdx    = net.ReadUInt(4)
+    local sndIdx    = net.ReadUInt(8)   -- FIX WARN 1: was ReadUInt(4)
 
     local IMPACT_SOUNDS = {
         "physics/concrete/impact_bullet1.wav",
@@ -294,6 +289,8 @@ net.Receive("ac47_bullet_impact", function()
     ed2:SetScale(0.3)
     util.Effect("ManhackSparks", ed2)
 
+    -- FIX BUG 1: sound.Play is now ONLY here (client-side), not on the server.
+    -- This eliminates the double-impact-sound on the listen server host.
     sound.Play(IMPACT_SOUNDS[sndIdx], hitPos, 75, math.random(95, 110), 1.0)
 end)
 
