@@ -7,7 +7,6 @@ local MUZZLE_VEL = 56000
 local MAX_DIST   = 45000
 local MIN_SPEED  = 200
 
--- ─── Shared projectile store ────────────────────────────────────────────────────────────────
 ac47_m134_store = ac47_m134_store or {
     last_idx           = 0,
     buffer_size        = 128,
@@ -30,10 +29,8 @@ if #ac47_m134_store.buffer == 0 then
     end
 end
 
--- ─── Engine ambient loop table ─────────────────────────────────────────────────────────────
 ac47_ambient_loops = ac47_ambient_loops or {}
 
--- ─── Net: new projectile ────────────────────────────────────────────────────────────────────
 net.Receive("ac47_m134_projectile", function()
     local pos = net.ReadVector()
     local dir = net.ReadVector()
@@ -57,7 +54,6 @@ net.Receive("ac47_m134_projectile", function()
     store.active_projectiles[#store.active_projectiles + 1] = proj
 end)
 
--- ─── Net: plane spatial sound → ambient loop management ───────────────────────────
 net.Receive("ac47_plane_spatial_sound", function()
     local sndPath  = net.ReadString()
     local nearPos  = net.ReadVector()
@@ -66,12 +62,7 @@ net.Receive("ac47_plane_spatial_sound", function()
     local volume   = net.ReadFloat()
     local entIndex = net.ReadUInt(16)
 
-    -- FIX WARN 2: previous pattern matched "engine" in "skytrain_engine_stop.wav",
-    -- causing the one-shot stop sound to be treated as a loop.
-    -- Now we only loop sounds with "rpm" or "_far" in the path, which are the
-    -- actual continuous engine loop files. The start/stop sounds are one-shots.
-    local isLoop = string.find(sndPath, "rpm") or
-                   string.find(sndPath, "engine_far")
+    local isLoop = string.find(sndPath, "rpm") or string.find(sndPath, "engine_far")
 
     if isLoop then
         if not ac47_ambient_loops[entIndex] then
@@ -98,7 +89,7 @@ hook.Add("EntityRemoved", "ac47_ambient_loop_cleanup", function(ent)
     ac47_ambient_loops[idx] = nil
 end)
 
--- ─── Passby logic ──────────────────────────────────────────────────────────────────────────
+-- ─── Passby logic ─────────────────────────────────────────────────────────────────
 local M134_PASSBY_COOLDOWN     = 0.22
 local M134_MAX_CONSIDER_DISTSQ = 4000 * 4000
 local m134_passby_last_time    = -99
@@ -131,9 +122,7 @@ local function m134_check_passby(proj)
     if not IsValid(listener) then return end
     local view_ent = GetViewEntity()
     if IsValid(view_ent) and not view_ent:IsPlayer() then return end
-
     local listen_pos = listener:EyePos()
-
     local mid_x = (proj.old_pos.x + proj.pos.x) * 0.5
     local mid_y = (proj.old_pos.y + proj.pos.y) * 0.5
     local mid_z = (proj.old_pos.z + proj.pos.z) * 0.5
@@ -141,23 +130,19 @@ local function m134_check_passby(proj)
     local dy = listen_pos.y - mid_y
     local dz = listen_pos.z - mid_z
     if (dx*dx + dy*dy + dz*dz) > M134_MAX_CONSIDER_DISTSQ then return end
-
     local sign_old = lateral_sign(proj.old_pos, listen_pos, proj.dir)
     local sign_new = lateral_sign(proj.pos,     listen_pos, proj.dir)
-
     if sign_old <= 0 then proj.m134_wizz = true return end
     if sign_new > 0  then return end
-
     proj.m134_wizz = true
     local now = UnPredictedCurTime()
     if (now - m134_passby_last_time) < M134_PASSBY_COOLDOWN then return end
     m134_passby_last_time = now
-
     local dist, closest_pos = util.DistanceToLine(proj.old_pos, proj.pos, listen_pos)
     m134_passby_emit(dist, closest_pos)
 end
 
--- ─── Client movement tick ──────────────────────────────────────────────────────────────────
+-- ─── Client movement tick ─────────────────────────────────────────────────────────
 local tick_interval = engine.TickInterval()
 local last_tick     = engine.TickCount()
 
@@ -195,7 +180,7 @@ hook.Add("CreateMove", "ac47_m134_move_cl", function()
     end
 end)
 
--- ─── Tracer renderer ────────────────────────────────────────────────────────────────────────
+-- ─── Tracer renderer ──────────────────────────────────────────────────────────────
 local function render_projectiles()
     local active = ac47_m134_store.active_projectiles
     local count  = #active
@@ -256,25 +241,26 @@ hook.Add("PostDrawTranslucentRenderables", "ac47_m134_render", function(depth, s
     render_projectiles()
 end)
 
--- ─── Impact FX (client-side: decal + ricochet + sound) ───────────────────────────────
+-- ─── Impact FX ────────────────────────────────────────────────────────────────────
+local IMPACT_SOUNDS = {
+    "physics/concrete/impact_bullet1.wav",
+    "physics/concrete/impact_bullet2.wav",
+    "physics/concrete/impact_bullet3.wav",
+    "physics/dirt/impact_bullet1.wav",
+    "physics/dirt/impact_bullet2.wav",
+    "physics/dirt/impact_bullet3.wav",
+    "physics/metal/metal_solid_impact_bullet1.wav",
+    "physics/metal/metal_solid_impact_bullet2.wav",
+    "physics/metal/metal_solid_impact_bullet3.wav",
+}
+
 net.Receive("ac47_bullet_impact", function()
     local hitPos    = net.ReadVector()
     local hitNormal = net.ReadVector()
-    local sndIdx    = net.ReadUInt(8)   -- FIX WARN 1: was ReadUInt(4)
-
-    local IMPACT_SOUNDS = {
-        "physics/concrete/impact_bullet1.wav",
-        "physics/concrete/impact_bullet2.wav",
-        "physics/concrete/impact_bullet3.wav",
-        "physics/dirt/impact_bullet1.wav",
-        "physics/dirt/impact_bullet2.wav",
-        "physics/dirt/impact_bullet3.wav",
-        "physics/metal/metal_solid_impact_bullet1.wav",
-        "physics/metal/metal_solid_impact_bullet2.wav",
-        "physics/metal/metal_solid_impact_bullet3.wav",
-    }
+    local sndIdx    = net.ReadUInt(8)
     sndIdx = math.Clamp(sndIdx, 1, #IMPACT_SOUNDS)
 
+    -- Sparks
     local ed = EffectData()
     ed:SetOrigin(hitPos)
     ed:SetNormal(hitNormal)
@@ -283,14 +269,33 @@ net.Receive("ac47_bullet_impact", function()
     ed:SetRadius(8)
     util.Effect("Sparks", ed)
 
+    -- Ricochet sparks
     local ed2 = EffectData()
     ed2:SetOrigin(hitPos)
     ed2:SetNormal(hitNormal)
     ed2:SetScale(0.3)
     util.Effect("ManhackSparks", ed2)
 
-    -- FIX BUG 1: sound.Play is now ONLY here (client-side), not on the server.
-    -- This eliminates the double-impact-sound on the listen server host.
+    -- Dust puff: shoot upward from the hit point along the surface normal
+    -- Scale 1 = standard TS_DUST cloud; kept small so high-ROF doesn't saturate the screen.
+    local ed3 = EffectData()
+    ed3:SetOrigin(hitPos + hitNormal * 2)  -- tiny offset so it isn't z-fighting the surface
+    ed3:SetNormal(hitNormal)
+    ed3:SetScale(0.6)       -- cloud radius multiplier
+    ed3:SetMagnitude(80)    -- upward velocity of dust particles
+    ed3:SetRadius(12)       -- spread radius
+    ed3:SetDamageType(0)
+    util.Effect("GaussExplosion", ed3)  -- HL2 dust/dirt puff, already in base game
+
+    -- Second lighter dust wisp for variance
+    local ed4 = EffectData()
+    ed4:SetOrigin(hitPos + hitNormal * 2)
+    ed4:SetNormal(hitNormal)
+    ed4:SetScale(0.35)
+    ed4:SetMagnitude(50)
+    ed4:SetRadius(8)
+    util.Effect("GaussExplosion", ed4)
+
     sound.Play(IMPACT_SOUNDS[sndIdx], hitPos, 75, math.random(95, 110), 1.0)
 end)
 

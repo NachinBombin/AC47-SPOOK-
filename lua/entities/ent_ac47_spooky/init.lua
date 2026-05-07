@@ -26,10 +26,6 @@ util.PrecacheSound("lfs/tfre_ac47/skytrain_engine_far.wav")
 
 util.AddNetworkString("ac47_plane_damage_tier")
 util.AddNetworkString("ac47_plane_spatial_sound")
-
--- ac47_gun_sound: tells clients to start or stop the m134 loop on a specific gun.
--- Payload: UInt16 entIndex, UInt8 gunIdx (1-3), Bool isStart
--- The client uses CreateSound so it holds a stoppable handle.
 util.AddNetworkString("ac47_gun_sound")
 
 -- ============================================================
@@ -96,9 +92,6 @@ function ENT:FlushPendingSounds()
     self.pending_sounds = keep
 end
 
--- Send start/stop for the m134 loop sound to all clients.
--- isStart=true  → clients call CreateSound():PlayEx()
--- isStart=false → clients call :Stop() and nil the handle
 function ENT:BroadcastGunSound(gunIdx, isStart)
     net.Start("ac47_gun_sound")
         net.WriteUInt(self:EntIndex(), 16)
@@ -117,8 +110,7 @@ local MUZZLE_POINTS = {
     Vector(-259, 66, 85.6),
 }
 
-local PROP_BONES = { 25, 26 }
-local GUN_BONES  = { 22, 23, 24 }
+local GUN_BONES = { 22, 23, 24 }
 
 local BURST_DELAY          = 0.033
 local BURST_COUNT          = 40
@@ -133,6 +125,15 @@ local WEAPON_WINDOW        = 10
 local SPRAY_SOUND_DELAY    = 1.2
 local SPRAY_PAUSE_DURATION = 0.5
 local MUZZLE_FLASH_EVERY   = 4
+
+-- Line fire constants
+-- LINE_APPROACH_DIST: how far behind the target the line starts (along the
+-- plane's approach vector toward the target on the ground plane).
+-- Bullets fire sequentially closing toward target with tight jitter.
+local LINE_APPROACH_DIST  = 3000   -- start this many units behind target
+local LINE_BULLET_COUNT   = 60     -- bullets per line run
+local LINE_JITTER         = 40     -- very tight left-right spread
+local LINE_DELAY          = 0.025  -- faster cadence than burst for the stitch effect
 
 local GUN_BARREL_STEP = 35
 local CTRL_SMOOTH     = 10
@@ -236,10 +237,7 @@ function ENT:Initialize()
 
     self.PropAngle     = 0
     self.GunBarrelStep = { 0, 0, 0 }
-
-    -- GunFiring[gunIdx] = true while the burst/spray is playing a fire sound.
-    -- Used to gate BroadcastGunSound(stop) so we only send stop once per burst.
-    self.GunFiring = { false, false, false }
+    self.GunFiring     = { false, false, false }
 
     self.Guns = {}
     local ct = CurTime()
@@ -251,19 +249,23 @@ function ENT:Initialize()
             PendingWeapon    = nil,
             CurrentWeapon    = nil,
             WeaponWindowEnd  = 0,
+            -- burst
             BurstTimes       = {},
             ActiveBursts     = {},
             SweepStart       = nil,
             SweepEnd         = nil,
+            -- spray
             NextShotTime     = 0,
             NextSoundTime    = 0,
             SprayBurstEnd    = 0,
             SprayBulletCount = 0,
-            AimOffset = Vector(
-                math.Rand(-120, 120),
-                math.Rand(-120, 120),
-                0
-            ),
+            -- line
+            LineBulletsFired = 0,
+            LineNextShotTime = 0,
+            LineStartPos     = nil,
+            LineEndPos       = nil,
+
+            AimOffset = Vector(math.Rand(-120, 120), math.Rand(-120, 120), 0),
         }
     end
 
@@ -452,7 +454,6 @@ function ENT:HandleGunWindow(gunIdx, ct)
     local g = self.Guns[gunIdx]
     if not g then return end
     if g.IsPeaceful then
-        -- Gun went peaceful: stop its fire sound if still playing
         if self.GunFiring[gunIdx] then
             self.GunFiring[gunIdx] = false
             self:BroadcastGunSound(gunIdx, false)
@@ -469,12 +470,12 @@ function ENT:HandleGunWindow(gunIdx, ct)
         return
     end
     if     g.CurrentWeapon == "burst" then self:UpdateGunBurst(gunIdx, ct)
-    elseif g.CurrentWeapon == "spray" then self:UpdateGunSpray(gunIdx, ct) end
+    elseif g.CurrentWeapon == "spray" then self:UpdateGunSpray(gunIdx, ct)
+    elseif g.CurrentWeapon == "line"  then self:UpdateGunLine(gunIdx, ct) end
 end
 
 function ENT:EnterGunPeaceful(gunIdx, ct)
     local g = self.Guns[gunIdx]
-    -- Stop fire sound when entering peaceful
     if self.GunFiring[gunIdx] then
         self.GunFiring[gunIdx] = false
         self:BroadcastGunSound(gunIdx, false)
@@ -482,16 +483,20 @@ function ENT:EnterGunPeaceful(gunIdx, ct)
     g.CurrentWeapon  = nil
     g.IsPeaceful     = true
     g.PeacefulUntil  = ct + math.Rand(PEACEFUL_MIN, PEACEFUL_MAX)
-    g.PendingWeapon  = math.random() < 0.6 and "burst" or "spray"
+    -- Equal 1/3 chance for each mode
+    local r = math.random(3)
+    g.PendingWeapon  = r == 1 and "burst" or r == 2 and "spray" or "line"
     g.AimOffset = Vector(math.Rand(-120, 120), math.Rand(-120, 120), 0)
 end
 
 function ENT:ArmGun(gunIdx, weapon, ct)
     local g   = self.Guns[gunIdx]
-    weapon    = weapon or (math.random() < 0.6 and "burst" or "spray")
+    local r   = math.random(3)
+    weapon    = weapon or (r == 1 and "burst" or r == 2 and "spray" or "line")
     g.CurrentWeapon   = weapon
     g.WeaponWindowEnd = ct + WEAPON_WINDOW
     local targetPos   = self:GetGunTargetPos(gunIdx)
+
     if weapon == "burst" then
         g.BurstTimes   = { ct, ct + 4 }
         g.ActiveBursts = {}
@@ -499,6 +504,7 @@ function ENT:ArmGun(gunIdx, weapon, ct)
         g.SweepEnd     = nil
         self:StartGunBurst(gunIdx, targetPos)
         g.BurstTimes[1] = false
+
     elseif weapon == "spray" then
         g.NextShotTime     = ct
         g.NextSoundTime    = ct
@@ -509,6 +515,22 @@ function ENT:ArmGun(gunIdx, weapon, ct)
         sweepDir:Normalize()
         g.SweepStart = targetPos - sweepDir * SWEEP_HALF
         g.SweepEnd   = targetPos + sweepDir * SWEEP_HALF
+
+    elseif weapon == "line" then
+        -- Compute the approach direction: from plane position projected to ground
+        -- toward the target, so the stitch approaches the target head-on.
+        local planePos  = self:GetPos()
+        local toTarget  = targetPos - Vector(planePos.x, planePos.y, targetPos.z)
+        if toTarget:LengthSqr() < 1 then toTarget = self:GetForward() end
+        toTarget.z = 0
+        toTarget:Normalize()
+
+        -- LineStartPos is behind the target; LineEndPos is AT the target.
+        -- Bullets will interpolate from start → end over LINE_BULLET_COUNT shots.
+        g.LineStartPos     = targetPos - toTarget * LINE_APPROACH_DIST
+        g.LineEndPos       = targetPos
+        g.LineBulletsFired = 0
+        g.LineNextShotTime = ct
     end
 end
 
@@ -531,6 +553,8 @@ function ENT:GetGunTargetPos(gunIdx)
     return basePos + offsetDir * offsetDist + (g and g.AimOffset or Vector(0,0,0))
 end
 
+-- ─── BURST ────────────────────────────────────────────────────────────────────────
+
 function ENT:UpdateGunBurst(gunIdx, ct)
     local g = self.Guns[gunIdx]
     for i, t in ipairs(g.BurstTimes) do
@@ -539,7 +563,7 @@ function ENT:UpdateGunBurst(gunIdx, ct)
             g.BurstTimes[i] = false
         end
     end
-    local active = g.ActiveBursts
+    local active   = g.ActiveBursts
     local anyActive = false
     for idx = #active, 1, -1 do
         local burst = active[idx]
@@ -560,7 +584,6 @@ function ENT:UpdateGunBurst(gunIdx, ct)
             anyActive = true
         end
     end
-    -- Stop fire sound once all bursts in this window are exhausted
     if not anyActive and self.GunFiring[gunIdx] then
         self.GunFiring[gunIdx] = false
         self:BroadcastGunSound(gunIdx, false)
@@ -580,7 +603,6 @@ function ENT:StartGunBurst(gunIdx, targetPos)
     self:ManipulateBoneAngles(GUN_BONES[gunIdx], Angle(self.GunBarrelStep[gunIdx], 0, 0))
     self:SpawnGunMuzzleFX(gunIdx)
 
-    -- Start the fire sound loop on clients (only if not already playing)
     if not self.GunFiring[gunIdx] then
         self.GunFiring[gunIdx] = true
         self:BroadcastGunSound(gunIdx, true)
@@ -600,10 +622,11 @@ function ENT:FireGunBullet(gunIdx, burst)
     ))
 end
 
+-- ─── SPRAY ────────────────────────────────────────────────────────────────────────
+
 function ENT:UpdateGunSpray(gunIdx, ct)
     local g = self.Guns[gunIdx]
     if ct >= g.WeaponWindowEnd then
-        -- Window ended: stop sound
         if self.GunFiring[gunIdx] then
             self.GunFiring[gunIdx] = false
             self:BroadcastGunSound(gunIdx, false)
@@ -617,13 +640,11 @@ function ENT:UpdateGunSpray(gunIdx, ct)
         g.SprayBurstEnd = ct + (SPRAY_SOUND_DELAY - SPRAY_PAUSE_DURATION)
         g.NextShotTime  = ct
         g.NextSoundTime = ct + SPRAY_SOUND_DELAY
-        -- Start fire loop if not already going
         if not self.GunFiring[gunIdx] then
             self.GunFiring[gunIdx] = true
             self:BroadcastGunSound(gunIdx, true)
         end
     end
-    -- Stop between spray pulses
     if ct >= g.SprayBurstEnd then
         if self.GunFiring[gunIdx] then
             self.GunFiring[gunIdx] = false
@@ -644,6 +665,80 @@ function ENT:UpdateGunSpray(gunIdx, ct)
         math.Rand(-JITTER * 2, JITTER * 2),
         0
     ))
+end
+
+-- ─── LINE ─────────────────────────────────────────────────────────────────────────
+-- Fires a straight vector of bullets on the ground that march from
+-- LINE_APPROACH_DIST behind the target, closing to the target point.
+-- Tight lateral jitter (LINE_JITTER) keeps the stitch visually clean.
+
+function ENT:UpdateGunLine(gunIdx, ct)
+    local g = self.Guns[gunIdx]
+    if ct >= g.WeaponWindowEnd then
+        if self.GunFiring[gunIdx] then
+            self.GunFiring[gunIdx] = false
+            self:BroadcastGunSound(gunIdx, false)
+        end
+        return
+    end
+    if not g.LineStartPos then
+        -- Safety: if ArmGun didn't set the line positions, build them now
+        local targetPos = self:GetGunTargetPos(gunIdx)
+        local planePos  = self:GetPos()
+        local toTarget  = targetPos - Vector(planePos.x, planePos.y, targetPos.z)
+        if toTarget:LengthSqr() < 1 then toTarget = self:GetForward() end
+        toTarget.z = 0
+        toTarget:Normalize()
+        g.LineStartPos     = targetPos - toTarget * LINE_APPROACH_DIST
+        g.LineEndPos       = targetPos
+        g.LineBulletsFired = 0
+        g.LineNextShotTime = ct
+    end
+    if ct < g.LineNextShotTime then return end
+
+    -- Start fire sound on first bullet
+    if not self.GunFiring[gunIdx] then
+        self.GunFiring[gunIdx] = true
+        self:BroadcastGunSound(gunIdx, true)
+    end
+
+    -- Fraction 0 = start (far from target), 1 = end (at target)
+    local fraction   = math.Clamp(g.LineBulletsFired / (LINE_BULLET_COUNT - 1), 0, 1)
+    local groundPos  = LerpVector(fraction, g.LineStartPos, g.LineEndPos)
+    local muzzlePos  = self:LocalToWorld(MUZZLE_POINTS[self.Guns[gunIdx].MuzzleIndex])
+
+    -- Compute the perpendicular to the line direction for lateral jitter
+    local lineDir = g.LineEndPos - g.LineStartPos
+    lineDir.z = 0
+    if lineDir:LengthSqr() > 1 then lineDir:Normalize() end
+    local perp = Vector(-lineDir.y, lineDir.x, 0)  -- 90-degree rotation in XY
+
+    local impactPos = groundPos
+        + perp  * math.Rand(-LINE_JITTER, LINE_JITTER)  -- tight lateral spread
+        + lineDir * math.Rand(-LINE_JITTER * 0.5, LINE_JITTER * 0.5)  -- minimal forward scatter
+
+    self:FireM134BulletAt(muzzlePos, impactPos)
+
+    if g.LineBulletsFired % MUZZLE_FLASH_EVERY == 0 then
+        self:SpawnGunMuzzleFX(gunIdx)
+        self.GunBarrelStep[gunIdx] = (self.GunBarrelStep[gunIdx] + GUN_BARREL_STEP) % 360
+        self:ManipulateBoneAngles(GUN_BONES[gunIdx], Angle(self.GunBarrelStep[gunIdx], 0, 0))
+    end
+
+    g.LineBulletsFired = g.LineBulletsFired + 1
+    g.LineNextShotTime = ct + LINE_DELAY
+
+    -- Run is finished once all bullets are fired
+    if g.LineBulletsFired >= LINE_BULLET_COUNT then
+        if self.GunFiring[gunIdx] then
+            self.GunFiring[gunIdx] = false
+            self:BroadcastGunSound(gunIdx, false)
+        end
+        -- Reset so next arm can recompute a fresh line toward current target
+        g.LineStartPos = nil
+        g.LineEndPos   = nil
+        self:EnterGunPeaceful(gunIdx, ct)
+    end
 end
 
 -- ============================================================
@@ -673,20 +768,29 @@ function ENT:GetPrimaryTarget()
 end
 
 -- ============================================================
--- MUZZLE FX
+-- MUZZLE FX  — scaled to 0.15x the original sizes
+-- Original: cball_explode scale 0.2, ManhackSparks scale 0.2
+-- 0.15x of 0.2 = 0.03
 -- ============================================================
 
 function ENT:SpawnGunMuzzleFX(gunIdx)
     local g        = self.Guns[gunIdx]
     local worldPos = self:LocalToWorld(MUZZLE_POINTS[g.MuzzleIndex])
     local ang      = self:GetAngles()
+
     local ed = EffectData()
-    ed:SetOrigin(worldPos) ed:SetAngles(ang) ed:SetScale(0.2)
+    ed:SetOrigin(worldPos)
+    ed:SetAngles(ang)
+    ed:SetScale(0.03)   -- was 0.2 → 0.15x = 0.03
     util.Effect("cball_explode", ed, true, true)
+
     for _ = 1, 2 do
         local sp = EffectData()
         sp:SetOrigin(worldPos + Vector(math.Rand(-3,3), math.Rand(-3,3), 0))
-        sp:SetNormal(ang:Up()) sp:SetScale(0.2) sp:SetMagnitude(0.2) sp:SetRadius(2)
+        sp:SetNormal(ang:Up())
+        sp:SetScale(0.03)       -- was 0.2 → 0.15x = 0.03
+        sp:SetMagnitude(0.03)   -- was 0.2 → 0.15x = 0.03
+        sp:SetRadius(0.3)       -- was 2   → 0.15x = 0.3
         util.Effect("ManhackSparks", sp, true, true)
     end
 end
