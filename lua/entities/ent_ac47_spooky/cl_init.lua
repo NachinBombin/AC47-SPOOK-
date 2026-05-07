@@ -7,10 +7,9 @@ game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
 -- ============================================================
--- GUN FIRE SOUND HANDLES
--- ac47_gun_loops[entIndex][gunIdx] = CSoundPatch handle
--- Created via CreateSound so they can be stopped cleanly.
--- NEVER use sound.Play for the m134_shoot.wav loop file.
+-- GUN FIRE SOUND
+-- SetSoundLevel(110) is required — without it CreateSound uses
+-- the WAV header default which is too quiet at any distance.
 -- ============================================================
 
 local M134_FIRE_SOUND = "lfs/tfre_ac47/m134_shoot.wav"
@@ -24,11 +23,11 @@ net.Receive("ac47_gun_sound", function()
     if isStart then
         local ent = Entity(entIndex)
         if not IsValid(ent) then return end
-        ac47_gun_loops[entIndex]          = ac47_gun_loops[entIndex] or {}
-        -- Only create if not already playing
+        ac47_gun_loops[entIndex] = ac47_gun_loops[entIndex] or {}
         if ac47_gun_loops[entIndex][gunIdx] then return end
         local snd = CreateSound(ent, M134_FIRE_SOUND)
         if snd then
+            snd:SetSoundLevel(110)   -- FIX: boost audible radius, was missing entirely
             snd:PlayEx(1.0, 100)
             ac47_gun_loops[entIndex][gunIdx] = snd
         end
@@ -42,7 +41,6 @@ net.Receive("ac47_gun_sound", function()
     end
 end)
 
--- Clean up all gun sound handles when the plane entity is removed
 hook.Add("EntityRemoved", "ac47_gun_loop_cleanup", function(ent)
     if not IsValid(ent) then return end
     local idx   = ent:EntIndex()
@@ -53,6 +51,63 @@ hook.Add("EntityRemoved", "ac47_gun_loop_cleanup", function(ent)
         end
     end
     ac47_gun_loops[idx] = nil
+end)
+
+-- ============================================================
+-- MUZZLE FLASH — CLIENT SPRITE RENDERER
+-- Receives a world position from the server net message.
+-- Stores it in a queue; PostDrawTranslucentRenderables draws
+-- each flash as a single additive sprite and expires it after
+-- one rendered frame. Zero particles, zero explosion effects.
+-- ============================================================
+
+local mat_flash  = Material("sprites/light_glow02_add")
+local mat_flash2 = Material("sprites/glow04_noz")
+
+-- Each entry: { pos=Vector, expire=time }
+local muzzle_flashes = {}
+
+net.Receive("ac47_muzzle_flash", function()
+    local pos = net.ReadVector()
+    -- Expire after 1 rendered frame worth of time (~0.033s at 30fps).
+    -- We use a short but non-zero window so even low-fps clients see it.
+    muzzle_flashes[#muzzle_flashes + 1] = {
+        pos    = pos,
+        expire = UnPredictedCurTime() + 0.04,
+    }
+end)
+
+hook.Add("PostDrawTranslucentRenderables", "ac47_muzzle_flash_draw", function(depth, skybox)
+    if depth or skybox then return end
+    local ct    = UnPredictedCurTime()
+    local count = #muzzle_flashes
+    if count == 0 then return end
+
+    local cam = EyePos()
+    local keep = {}
+
+    for i = 1, count do
+        local f = muzzle_flashes[i]
+        if ct > f.expire then continue end
+
+        local dist  = cam:Distance(f.pos)
+        -- Scale the sprite relative to view distance so it stays visible
+        -- from high altitude but doesn't dominate when viewed up close.
+        -- Base size 18 units, scales slightly with distance, hard-capped.
+        local sz = math.Clamp(18 + dist * 0.003, 18, 40)
+
+        -- Inner hot core — white/yellow additive
+        render.SetMaterial(mat_flash2)
+        render.DrawSprite(f.pos, sz * 0.6, sz * 0.6, Color(255, 240, 160, 220))
+
+        -- Outer glow bloom
+        render.SetMaterial(mat_flash)
+        render.DrawSprite(f.pos, sz, sz, Color(255, 160, 40, 160))
+
+        keep[#keep + 1] = f
+    end
+
+    muzzle_flashes = keep
 end)
 
 -- ============================================================
@@ -154,7 +209,6 @@ net.Receive("ac47_plane_damage_tier", function()
         local snd = ac47_ambient_loops[entIndex]
         if snd then snd:Stop() end
         ac47_ambient_loops[entIndex] = nil
-        -- Also stop all gun loops in case plane was destroyed mid-burst
         local slots = ac47_gun_loops[entIndex]
         if slots then
             for _, gsnd in pairs(slots) do

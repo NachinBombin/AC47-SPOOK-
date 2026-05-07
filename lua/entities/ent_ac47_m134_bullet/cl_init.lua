@@ -7,6 +7,7 @@ local MUZZLE_VEL = 56000
 local MAX_DIST   = 45000
 local MIN_SPEED  = 200
 
+-- ─── Shared projectile store ──────────────────────────────────────────────────
 ac47_m134_store = ac47_m134_store or {
     last_idx           = 0,
     buffer_size        = 128,
@@ -31,6 +32,7 @@ end
 
 ac47_ambient_loops = ac47_ambient_loops or {}
 
+-- ─── Net: new projectile ──────────────────────────────────────────────────────
 net.Receive("ac47_m134_projectile", function()
     local pos = net.ReadVector()
     local dir = net.ReadVector()
@@ -54,6 +56,7 @@ net.Receive("ac47_m134_projectile", function()
     store.active_projectiles[#store.active_projectiles + 1] = proj
 end)
 
+-- ─── Net: plane spatial sound ─────────────────────────────────────────────────
 net.Receive("ac47_plane_spatial_sound", function()
     local sndPath  = net.ReadString()
     local nearPos  = net.ReadVector()
@@ -89,7 +92,7 @@ hook.Add("EntityRemoved", "ac47_ambient_loop_cleanup", function(ent)
     ac47_ambient_loops[idx] = nil
 end)
 
--- ─── Passby logic ─────────────────────────────────────────────────────────────────
+-- ─── Passby logic ─────────────────────────────────────────────────────────────
 local M134_PASSBY_COOLDOWN     = 0.22
 local M134_MAX_CONSIDER_DISTSQ = 4000 * 4000
 local m134_passby_last_time    = -99
@@ -142,7 +145,7 @@ local function m134_check_passby(proj)
     m134_passby_emit(dist, closest_pos)
 end
 
--- ─── Client movement tick ─────────────────────────────────────────────────────────
+-- ─── Client movement tick ─────────────────────────────────────────────────────
 local tick_interval = engine.TickInterval()
 local last_tick     = engine.TickCount()
 
@@ -180,7 +183,7 @@ hook.Add("CreateMove", "ac47_m134_move_cl", function()
     end
 end)
 
--- ─── Tracer renderer ──────────────────────────────────────────────────────────────
+-- ─── Tracer renderer ──────────────────────────────────────────────────────────
 local function render_projectiles()
     local active = ac47_m134_store.active_projectiles
     local count  = #active
@@ -241,7 +244,16 @@ hook.Add("PostDrawTranslucentRenderables", "ac47_m134_render", function(depth, s
     render_projectiles()
 end)
 
--- ─── Impact FX ────────────────────────────────────────────────────────────────────
+-- ============================================================
+-- IMPACT FX
+-- Bullet hole decal  : util.Decal — stamped directly on world geo
+-- Dust puff          : ParticleEmitter — 6 manual dust particles,
+--                      no PCF dependency, no explosion effects.
+-- Impact sound       : sound.Play at hit position.
+-- util.Effect is NOT used here at all — every named effect that
+-- produced explosions/smoke has been removed.
+-- ============================================================
+
 local IMPACT_SOUNDS = {
     "physics/concrete/impact_bullet1.wav",
     "physics/concrete/impact_bullet2.wav",
@@ -254,48 +266,62 @@ local IMPACT_SOUNDS = {
     "physics/metal/metal_solid_impact_bullet3.wav",
 }
 
+-- Dust material: base HL2 smoke puff, always present, no addon needed.
+local mat_dust = Material("particle/smokestack")
+
+local function SpawnDustPuff(hitPos, hitNormal)
+    -- ParticleEmitter lives in 3D world space.
+    -- Third arg false = don't use a 2D screen-space emitter.
+    local emitter = ParticleEmitter(hitPos, false)
+    if not emitter then return end
+
+    -- 6 dust particles fanning out from the surface normal.
+    for _ = 1, 6 do
+        local p = emitter:Add("particle/smokestack", hitPos)
+        if p then
+            -- Base velocity: along the surface normal + random sideways scatter
+            local scatter = VectorRand() * 18
+            scatter.z     = math.abs(scatter.z)  -- keep upward bias
+            local vel     = hitNormal * math.Rand(20, 55) + scatter
+
+            p:SetVelocity(vel)
+            p:SetLifeTime(0)
+            p:SetDieTime(math.Rand(0.25, 0.55))
+            p:SetStartAlpha(math.random(60, 100))
+            p:SetEndAlpha(0)
+            p:SetStartSize(math.Rand(4, 9))
+            p:SetEndSize(math.Rand(12, 22))
+            p:SetRoll(math.Rand(0, 360))
+            p:SetRollDelta(math.Rand(-1.5, 1.5))
+            -- Brownish-gray dust tint
+            p:SetColor(
+                math.random(140, 190),
+                math.random(120, 160),
+                math.random(80,  120)
+            )
+            p:SetGravity(Vector(0, 0, -30))   -- slight gravity drag
+            p:SetAirResistance(80)
+        end
+    end
+
+    emitter:Finish()
+end
+
 net.Receive("ac47_bullet_impact", function()
     local hitPos    = net.ReadVector()
     local hitNormal = net.ReadVector()
     local sndIdx    = net.ReadUInt(8)
     sndIdx = math.Clamp(sndIdx, 1, #IMPACT_SOUNDS)
 
-    -- Sparks
-    local ed = EffectData()
-    ed:SetOrigin(hitPos)
-    ed:SetNormal(hitNormal)
-    ed:SetScale(0.4)
-    ed:SetMagnitude(0.4)
-    ed:SetRadius(8)
-    util.Effect("Sparks", ed)
+    -- Bullet hole decal stamped on the surface.
+    -- "Impact.Concrete" is a standard HL2 decal group that picks a
+    -- random bullet hole sprite automatically. Works on world geometry.
+    util.Decal("Impact.Concrete", hitPos + hitNormal * 2, hitPos - hitNormal * 4)
 
-    -- Ricochet sparks
-    local ed2 = EffectData()
-    ed2:SetOrigin(hitPos)
-    ed2:SetNormal(hitNormal)
-    ed2:SetScale(0.3)
-    util.Effect("ManhackSparks", ed2)
+    -- Dust puff via ParticleEmitter (no util.Effect, no explosions).
+    SpawnDustPuff(hitPos, hitNormal)
 
-    -- Dust puff: shoot upward from the hit point along the surface normal
-    -- Scale 1 = standard TS_DUST cloud; kept small so high-ROF doesn't saturate the screen.
-    local ed3 = EffectData()
-    ed3:SetOrigin(hitPos + hitNormal * 2)  -- tiny offset so it isn't z-fighting the surface
-    ed3:SetNormal(hitNormal)
-    ed3:SetScale(0.6)       -- cloud radius multiplier
-    ed3:SetMagnitude(80)    -- upward velocity of dust particles
-    ed3:SetRadius(12)       -- spread radius
-    ed3:SetDamageType(0)
-    util.Effect("GaussExplosion", ed3)  -- HL2 dust/dirt puff, already in base game
-
-    -- Second lighter dust wisp for variance
-    local ed4 = EffectData()
-    ed4:SetOrigin(hitPos + hitNormal * 2)
-    ed4:SetNormal(hitNormal)
-    ed4:SetScale(0.35)
-    ed4:SetMagnitude(50)
-    ed4:SetRadius(8)
-    util.Effect("GaussExplosion", ed4)
-
+    -- Impact sound.
     sound.Play(IMPACT_SOUNDS[sndIdx], hitPos, 75, math.random(95, 110), 1.0)
 end)
 
