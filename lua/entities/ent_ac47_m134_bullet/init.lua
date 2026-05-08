@@ -2,13 +2,22 @@ AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
--- ─── Constants ───────────────────────────────────────────────────────────────────
+-- ─── Constants ────────────────────────────────────────────────────────────────────
 local MUZZLE_VEL = 46000
 local MAX_DIST   = 45000
 local MIN_SPEED  = 200
 local BLAST_DMG  = 18
 local BLAST_RAD  = 20
 local FORCE_MUL  = 3.0
+
+-- ─── Ricochet ────────────────────────────────────────────────────────────────────
+-- A ricochet bullet spawns in the surface normal hemisphere with a random
+-- scatter cone of up to RICOCHET_CONE degrees away from the true normal.
+-- It carries reduced damage and speed to feel like a spent deflection.
+local RICOCHET_CHANCE    = 0.02   -- 2 %
+local RICOCHET_CONE      = 60     -- degrees half-angle; full hemisphere = 90
+local RICOCHET_DMG_MUL   = 0.35  -- ricochet bullet does 35 % of original damage
+local RICOCHET_SPEED_MUL = 0.45  -- ricochet bullet leaves at 45 % original speed
 
 local IMPACT_SOUNDS = {
     "physics/concrete/impact_bullet1.wav",
@@ -49,13 +58,10 @@ if #ac47_m134_store.buffer == 0 then
     end
 end
 
-util.AddNetworkString("ac47_m134_projectile")  -- pos + dir → client tracer + passby
--- FIX BUG 1: ac47_bullet_impact is broadcast-only (client plays the sound).
--- The server no longer calls sound.Play locally, so the host does NOT hear
--- the impact twice (once from sound.Play server-side + once from net.Receive).
+util.AddNetworkString("ac47_m134_projectile")
 util.AddNetworkString("ac47_bullet_impact")
 
--- ─── Spawn function (mirrors bombin_gau_spawn) ──────────────────────────────
+-- ─── Spawn function (mirrors bombin_gau_spawn) ────────────────────────────────────
 function ac47_m134_spawn(shooter, firer_ent, pos, dir, damage, blast_radius)
     local store    = ac47_m134_store
     local proj_idx = bit.band(store.last_idx, store.buffer_size - 1) + 1
@@ -78,7 +84,6 @@ function ac47_m134_spawn(shooter, firer_ent, pos, dir, damage, blast_radius)
     store.last_idx = store.last_idx + 1
     store.active_projectiles[#store.active_projectiles + 1] = proj
 
-    -- Notify clients: pos + dir (unit vector)
     net.Start("ac47_m134_projectile")
         net.WriteVector(pos)
         net.WriteVector(dir)
@@ -91,20 +96,91 @@ local function resolve_attacker(proj)
     return game.GetWorld()
 end
 
+-- ─── Ricochet helper ────────────────────────────────────────────────────────────────
+-- Generates a unit vector inside a cone of half-angle `cone_deg` centred
+-- on `normal`. The cone is always in the normal's hemisphere (dot > 0).
+local function ricochet_dir(normal, cone_deg)
+    -- Build an arbitrary orthonormal basis around the normal.
+    -- Choose a helper vector that is never parallel to `normal`.
+    local helper = math.abs(normal.z) < 0.9 and Vector(0, 0, 1) or Vector(1, 0, 0)
+    local tangent   = normal:Cross(helper)  tangent:Normalize()
+    local bitangent = normal:Cross(tangent) bitangent:Normalize()
+
+    -- Uniform random point inside a disc of radius sin(cone_deg),
+    -- then lift to the unit sphere. This gives uniform distribution
+    -- over the spherical cap (no polar bunching).
+    local cone_rad  = math.rad(cone_deg)
+    local cos_max   = math.cos(cone_rad)
+    -- Random cosine in [cos_max, 1] gives uniform spherical-cap sampling.
+    local cos_theta = cos_max + math.random() * (1 - cos_max)
+    local sin_theta = math.sqrt(1 - cos_theta * cos_theta)
+    local phi       = math.random() * 2 * math.pi
+
+    local dir = normal    * cos_theta
+              + tangent   * (sin_theta * math.cos(phi))
+              + bitangent * (sin_theta * math.sin(phi))
+    dir:Normalize()
+    return dir
+end
+
+local function try_spawn_ricochet(proj, tr)
+    if math.random() > RICOCHET_CHANCE then return end
+
+    -- Only ricochet off world geometry and static props, not off players/NPCs.
+    -- tr.HitWorld is true for BSP world; check classname for non-world.
+    local hit_ent = tr.Entity
+    if IsValid(hit_ent) then
+        local cls = hit_ent:GetClass()
+        -- Skip ricochets off living entities (players, NPCs) and projectiles.
+        if hit_ent:IsNPC() or hit_ent:IsPlayer() then return end
+        if cls == "ent_ac47_m134_bullet" or cls == "ent_bombin_gau_bullet" then return end
+    end
+
+    local normal = tr.HitNormal
+    -- Ensure the normal is usable; degenerate normals can appear on edge cases.
+    if normal:LengthSqr() < 0.5 then return end
+
+    local rico_dir = ricochet_dir(normal, RICOCHET_CONE)
+
+    -- Spawn offset slightly off the surface along the normal to avoid
+    -- immediately re-hitting the same face on tick 0.
+    local spawn_pos = tr.HitPos + normal * 4
+
+    -- Reuse ac47_m134_spawn so the ricochet gets a client-side tracer too.
+    -- It inherits the same shooter/firer for kill credit.
+    local rico_damage = math.max(1, math.floor(proj.damage * RICOCHET_DMG_MUL))
+    ac47_m134_spawn(
+        proj.shooter,
+        proj.firer_ent,
+        spawn_pos,
+        rico_dir,
+        rico_damage,
+        proj.blast_radius
+    )
+
+    -- Override the ricochet bullet's speed after it is pushed into the buffer
+    -- (it was just appended at the tail of active_projectiles).
+    local active = ac47_m134_store.active_projectiles
+    local rico   = active[#active]
+    if rico and not rico.hit then
+        local reduced_speed = MUZZLE_VEL * RICOCHET_SPEED_MUL
+        rico.speed   = reduced_speed
+        rico.vel     = rico_dir * reduced_speed
+        rico.old_vel = rico.vel
+    end
+end
+
 local function apply_impact_fx(proj, tr)
     local hitPos   = tr.HitPos
     local attacker = resolve_attacker(proj)
 
     util.BlastDamage(attacker, attacker, hitPos, proj.blast_radius, proj.damage)
 
-    -- FIX BUG 1 + WARN 1: broadcast the impact to ALL clients (including host);
-    -- sound.Play is NOT called server-side anymore — only the net message fires.
-    -- Also upgraded to 8-bit sndIdx (was 4-bit, fragile if IMPACT_SOUNDS grows).
     local sndIdx = math.random(#IMPACT_SOUNDS)
     net.Start("ac47_bullet_impact")
         net.WriteVector(hitPos)
         net.WriteVector(tr.HitNormal)
-        net.WriteUInt(sndIdx, 8)   -- FIX WARN 1: was WriteUInt(..., 4)
+        net.WriteUInt(sndIdx, 8)
     net.Broadcast()
 end
 
@@ -149,6 +225,8 @@ local function move_projectile(proj)
             apply_damage(proj, tr)
         end
         apply_impact_fx(proj, tr)
+        -- Ricochet check runs AFTER impact FX so the impact always fires.
+        try_spawn_ricochet(proj, tr)
         return true
     end
 
@@ -173,7 +251,6 @@ hook.Add("Tick", "ac47_m134_move_sv", function()
     end
 end)
 
--- ENT:Initialize is a thin trampoline: unpack params, call ac47_m134_spawn, remove self.
 function ENT:Initialize()
     self:SetModel("models/weapons/bt_762.mdl")
     self:SetMoveType(MOVETYPE_NONE)
