@@ -25,10 +25,11 @@ util.PrecacheSound("lfs/tfre_ac47/skytrain_engine_far.wav")
 
 util.AddNetworkString("ac47_plane_damage_tier")
 util.AddNetworkString("ac47_plane_spatial_sound")
+util.AddNetworkString("ac47_gun_sound")
 util.AddNetworkString("ac47_muzzle_flash")
 
 -- ============================================================
--- SPATIAL SOUND SYSTEM
+-- SPATIAL SOUND SYSTEM  (engine sounds only)
 -- ============================================================
 
 local SOUND_SPEED     = 8200
@@ -91,17 +92,25 @@ function ENT:FlushPendingSounds()
 end
 
 -- ============================================================
--- CONSTANTS
+-- GUN SOUND BROADCAST
+-- Sends start/stop signals per gun index to the client.
+-- The client owns 3 CreateSound handles (one per gun wav).
+-- We only send this when the state actually changes.
 -- ============================================================
 
--- Each gun has its own unique wav file.
--- sound.Play is fire-and-forget positional: never deduplicates,
--- no entity channel, no stop/start collision between guns.
-local GUN_WAVS = {
-    "lfs/tfre_ac47/m134_shoot.wav",
-    "lfs/tfre_ac47/m134_shoot2.wav",
-    "lfs/tfre_ac47/m134_shoot3.wav",
-}
+function ENT:BroadcastGunSound(gunIdx, isStart)
+    if self.GunFiring[gunIdx] == isStart then return end  -- no change, skip
+    self.GunFiring[gunIdx] = isStart
+    net.Start("ac47_gun_sound")
+        net.WriteUInt(self:EntIndex(), 16)
+        net.WriteUInt(gunIdx, 8)
+        net.WriteBool(isStart)
+    net.Broadcast()
+end
+
+-- ============================================================
+-- CONSTANTS
+-- ============================================================
 
 local MUZZLE_POINTS = {
     Vector(-170, 66, 101.44),
@@ -232,6 +241,7 @@ function ENT:Initialize()
 
     self.PropAngle     = 0
     self.GunBarrelStep = { 0, 0, 0 }
+    -- GunFiring tracks the LAST broadcast state so we never double-send
     self.GunFiring     = { false, false, false }
 
     self.Guns = {}
@@ -299,9 +309,16 @@ function ENT:OnTakeDamage(dmginfo)
     if hp <= 0 then self:DestroyPlane() end
 end
 
+function ENT:StopAllGunSounds()
+    for i = 1, 3 do
+        self:BroadcastGunSound(i, false)
+    end
+end
+
 function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
+    self:StopAllGunSounds()
     self:BroadcastDamageTier(0)
     local pos = self.LastPos or self:GetPos()
     local function boom(p, sc)
@@ -337,6 +354,7 @@ function ENT:Think()
     end
     local ct = CurTime()
     if ct >= self.DieTime then
+        self:StopAllGunSounds()
         self:Remove()
         return
     end
@@ -433,6 +451,9 @@ function ENT:HandleGunWindow(gunIdx, ct)
     local g = self.Guns[gunIdx]
     if not g then return end
     if g.IsPeaceful then
+        if self.GunFiring[gunIdx] then
+            self:BroadcastGunSound(gunIdx, false)
+        end
         if ct >= g.PeacefulUntil then
             g.IsPeaceful = false
             self:ArmGun(gunIdx, g.PendingWeapon, ct)
@@ -451,6 +472,7 @@ end
 
 function ENT:EnterGunPeaceful(gunIdx, ct)
     local g = self.Guns[gunIdx]
+    self:BroadcastGunSound(gunIdx, false)
     g.CurrentWeapon  = nil
     g.IsPeaceful     = true
     g.PeacefulUntil  = ct + math.Rand(PEACEFUL_MIN, PEACEFUL_MAX)
@@ -485,6 +507,7 @@ function ENT:ArmGun(gunIdx, weapon, ct)
         sweepDir:Normalize()
         g.SweepStart = targetPos - sweepDir * SWEEP_HALF
         g.SweepEnd   = targetPos + sweepDir * SWEEP_HALF
+        self:BroadcastGunSound(gunIdx, true)
 
     elseif weapon == "line" then
         local planePos  = self:GetPos()
@@ -496,6 +519,7 @@ function ENT:ArmGun(gunIdx, weapon, ct)
         g.LineEndPos       = targetPos
         g.LineBulletsFired = 0
         g.LineNextShotTime = ct
+        self:BroadcastGunSound(gunIdx, true)
     end
 end
 
@@ -549,6 +573,8 @@ function ENT:UpdateGunBurst(gunIdx, ct)
             anyActive = true
         end
     end
+    -- Sound follows actual burst activity
+    self:BroadcastGunSound(gunIdx, anyActive)
 end
 
 function ENT:StartGunBurst(gunIdx, targetPos)
@@ -563,10 +589,6 @@ function ENT:StartGunBurst(gunIdx, targetPos)
     self.GunBarrelStep[gunIdx] = (self.GunBarrelStep[gunIdx] + GUN_BARREL_STEP) % 360
     self:ManipulateBoneAngles(GUN_BONES[gunIdx], Angle(self.GunBarrelStep[gunIdx], 0, 0))
     self:SpawnGunMuzzleFX(gunIdx)
-
-    -- Fire-and-forget positional sound: unique wav per gun, no channel,
-    -- no deduplication, never interrupted by other guns.
-    self:EmitSpatialSound(GUN_WAVS[gunIdx], self:LocalToWorld(MUZZLE_POINTS[gunIdx]), 150, 100, 1.0)
 end
 
 function ENT:FireGunBullet(gunIdx, burst)
@@ -586,7 +608,10 @@ end
 
 function ENT:UpdateGunSpray(gunIdx, ct)
     local g = self.Guns[gunIdx]
-    if ct >= g.WeaponWindowEnd then return end
+    if ct >= g.WeaponWindowEnd then
+        self:BroadcastGunSound(gunIdx, false)
+        return
+    end
     if g.NextSoundTime > 0 and ct >= g.NextSoundTime then
         self:SpawnGunMuzzleFX(gunIdx)
         self.GunBarrelStep[gunIdx] = (self.GunBarrelStep[gunIdx] + GUN_BARREL_STEP) % 360
@@ -594,9 +619,12 @@ function ENT:UpdateGunSpray(gunIdx, ct)
         g.SprayBurstEnd = ct + (SPRAY_SOUND_DELAY - SPRAY_PAUSE_DURATION)
         g.NextShotTime  = ct
         g.NextSoundTime = ct + SPRAY_SOUND_DELAY
-        self:EmitSpatialSound(GUN_WAVS[gunIdx], self:LocalToWorld(MUZZLE_POINTS[gunIdx]), 150, 100, 1.0)
     end
-    if ct >= g.SprayBurstEnd then return end
+    if ct >= g.SprayBurstEnd then
+        self:BroadcastGunSound(gunIdx, false)
+        return
+    end
+    self:BroadcastGunSound(gunIdx, true)
     if ct < g.NextShotTime then return end
     g.NextShotTime     = ct + BURST_DELAY
     g.SprayBulletCount = g.SprayBulletCount + 1
@@ -616,7 +644,10 @@ end
 
 function ENT:UpdateGunLine(gunIdx, ct)
     local g = self.Guns[gunIdx]
-    if ct >= g.WeaponWindowEnd then return end
+    if ct >= g.WeaponWindowEnd then
+        self:BroadcastGunSound(gunIdx, false)
+        return
+    end
     if not g.LineStartPos then
         local targetPos = self:GetGunTargetPos(gunIdx)
         local planePos  = self:GetPos()
@@ -628,7 +659,6 @@ function ENT:UpdateGunLine(gunIdx, ct)
         g.LineEndPos       = targetPos
         g.LineBulletsFired = 0
         g.LineNextShotTime = ct
-        self:EmitSpatialSound(GUN_WAVS[gunIdx], self:LocalToWorld(MUZZLE_POINTS[gunIdx]), 150, 100, 1.0)
     end
     if ct < g.LineNextShotTime then return end
 
@@ -659,6 +689,7 @@ function ENT:UpdateGunLine(gunIdx, ct)
     if g.LineBulletsFired >= LINE_BULLET_COUNT then
         g.LineStartPos = nil
         g.LineEndPos   = nil
+        self:BroadcastGunSound(gunIdx, false)
         self:EnterGunPeaceful(gunIdx, ct)
     end
 end
@@ -712,7 +743,7 @@ function ENT:FireM134BulletAt(muzzlePos, impactPos)
     if ac47_m134_spawn then
         ac47_m134_spawn(self, self, muzzlePos, dir, BULLET_DAMAGE, nil)
     else
-        self:Debug("WARN: ac47_m134_spawn not available — bullet skipped")
+        self:Debug("WARN: ac47_m134_spawn not available -- bullet skipped")
     end
 end
 

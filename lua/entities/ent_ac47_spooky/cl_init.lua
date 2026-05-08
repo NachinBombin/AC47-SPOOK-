@@ -3,17 +3,23 @@ include("cl_trailsystem.lua")
 
 ac47_ambient_loops = ac47_ambient_loops or {}
 
+-- Gun sound handles: ac47_gun_sounds[entIndex][gunIdx] = CSoundPatch
+-- One CreateSound handle per gun. Each gun has its own wav so Source
+-- never confuses them. Start/Stop are called on the exact handle.
+ac47_gun_sounds = ac47_gun_sounds or {}
+
 game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
--- NOTE: Muzzle flash net.Receive and gun fire sound handler have been
--- moved to lua/autorun/client/cl_ac47_fx.lua so they are always
--- registered regardless of plane PVS state.
+-- Wav files that match each gun index 1/2/3
+local GUN_WAVS = {
+    "lfs/tfre_ac47/m134_shoot.wav",
+    "lfs/tfre_ac47/m134_shoot2.wav",
+    "lfs/tfre_ac47/m134_shoot3.wav",
+}
 
 -- ============================================================
--- PLANE ENGINE AMBIENT LOOP
--- Received via ac47_plane_spatial_sound net message.
--- SetSoundLevel(130) gives a wide audible radius for the engine.
+-- ENGINE AMBIENT LOOP
 -- ============================================================
 
 net.Receive("ac47_plane_spatial_sound", function()
@@ -32,14 +38,69 @@ net.Receive("ac47_plane_spatial_sound", function()
             if IsValid(ent) then
                 local snd = CreateSound(ent, sndPath)
                 if snd then
-                    snd:SetSoundLevel(130)   -- FIX: was missing, engine barely audible
+                    snd:SetSoundLevel(130)
                     snd:PlayEx(volume, pitch)
                     ac47_ambient_loops[entIndex] = snd
                 end
             end
         end
     else
+        -- One-shot positional sounds (e.g. engine_start)
         sound.Play(sndPath, nearPos, level, pitch, volume)
+    end
+end)
+
+-- ============================================================
+-- GUN SOUNDS
+-- Each gun index owns one CreateSound handle on the entity.
+-- Server sends isStart=true when the gun begins firing,
+-- isStart=false when it stops. The dedup guard in BroadcastGunSound
+-- means we only ever receive a real state change.
+-- ============================================================
+
+net.Receive("ac47_gun_sound", function()
+    local entIndex = net.ReadUInt(16)
+    local gunIdx   = net.ReadUInt(8)
+    local isStart  = net.ReadBool()
+
+    local ent = Entity(entIndex)
+    if not IsValid(ent) then return end
+
+    if not ac47_gun_sounds[entIndex] then
+        ac47_gun_sounds[entIndex] = {}
+    end
+    local handles = ac47_gun_sounds[entIndex]
+
+    if isStart then
+        -- Only create a new handle if one isn't already playing
+        if not handles[gunIdx] then
+            local wav = GUN_WAVS[gunIdx]
+            if not wav then return end
+            local snd = CreateSound(ent, wav)
+            if snd then
+                snd:SetSoundLevel(150)
+                snd:PlayEx(1.0, 100)
+                handles[gunIdx] = snd
+            end
+        end
+    else
+        if handles[gunIdx] then
+            handles[gunIdx]:Stop()
+            handles[gunIdx] = nil
+        end
+    end
+end)
+
+-- Clean up all sound handles when the entity is removed
+hook.Add("EntityRemoved", "ac47_gun_sound_cleanup", function(ent)
+    if not IsValid(ent) then return end
+    local idx     = ent:EntIndex()
+    local handles = ac47_gun_sounds[idx]
+    if handles then
+        for _, snd in pairs(handles) do
+            if snd then snd:Stop() end
+        end
+        ac47_gun_sounds[idx] = nil
     end
 end)
 
@@ -139,9 +200,18 @@ net.Receive("ac47_plane_damage_tier", function()
     AC47TrailSystem_SetTier(entIndex, tier)
 
     if tier == 0 then
+        -- Stop engine loop
         local snd = ac47_ambient_loops[entIndex]
         if snd then snd:Stop() end
         ac47_ambient_loops[entIndex] = nil
+        -- Stop ALL gun sounds (plane is dead/silent)
+        local handles = ac47_gun_sounds[entIndex]
+        if handles then
+            for _, h in pairs(handles) do
+                if h then h:Stop() end
+            end
+            ac47_gun_sounds[entIndex] = nil
+        end
     end
 
     local state = PlaneStates[entIndex]
