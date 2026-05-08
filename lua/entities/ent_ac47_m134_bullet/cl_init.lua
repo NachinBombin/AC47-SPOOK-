@@ -36,8 +36,8 @@ ac47_ambient_loops = ac47_ambient_loops or {}
 local RICO_CHANCE    = 0.009
 local RICO_SPEED_MIN = 8000
 local RICO_SPEED_MAX = 18000
-local RICO_DUR_MIN   = 0.30   -- was 0.06
-local RICO_DUR_MAX   = 0.70   -- was 0.18
+local RICO_DUR_MIN   = 0.30
+local RICO_DUR_MAX   = 0.70
 local RICO_BUF_SIZE  = 32
 
 local rico_store = {
@@ -106,64 +106,6 @@ local function spawn_visual_rico(hitPos, hitNormal)
 
     store.last_idx = store.last_idx + 1
     store.active_visuals[#store.active_visuals + 1] = slot
-end
-
--- ─── Ground ignition ──────────────────────────────────────────────────────────────
--- Purely cosmetic fire burst at the impact point.
--- Uses ParticleEmitter with the stock HL2 fire sprite
--- ("particle/fire" is always available, no addon needed).
--- Spawns on the same 0.9% roll as the visual ricochet.
-local function SpawnGroundIgnition(hitPos, hitNormal)
-    local emitter = ParticleEmitter(hitPos, false)
-    if not emitter then return end
-
-    -- Fire core: 8 bright orange-yellow particles rising along the normal.
-    for _ = 1, 8 do
-        local p = emitter:Add("particle/fire", hitPos)
-        if p then
-            local scatter = VectorRand() * 12
-            scatter.z = m_abs(scatter.z)  -- bias upward
-            local vel = hitNormal * m_rand(30, 90) + scatter
-            p:SetVelocity(vel)
-            p:SetLifeTime(0)
-            p:SetDieTime(m_rand(0.18, 0.45))
-            p:SetStartAlpha(m_random(180, 255))
-            p:SetEndAlpha(0)
-            p:SetStartSize(m_rand(6, 14))
-            p:SetEndSize(m_rand(18, 36))
-            p:SetRoll(m_rand(0, 360))
-            p:SetRollDelta(m_rand(-2.5, 2.5))
-            -- Hot orange-white fire tint.
-            p:SetColor(
-                255,
-                m_random(80, 180),
-                m_random(0,  40)
-            )
-            p:SetGravity(Vector(0, 0, 20))   -- fire rises
-            p:SetAirResistance(40)
-        end
-    end
-
-    -- Ember sparks: 5 tiny bright white-orange points that scatter wider.
-    for _ = 1, 5 do
-        local p = emitter:Add("particle/fire", hitPos)
-        if p then
-            local scatter = VectorRand() * 30
-            scatter.z = m_abs(scatter.z)
-            p:SetVelocity(hitNormal * m_rand(10, 40) + scatter)
-            p:SetLifeTime(0)
-            p:SetDieTime(m_rand(0.08, 0.22))
-            p:SetStartAlpha(255)
-            p:SetEndAlpha(0)
-            p:SetStartSize(m_rand(2, 5))
-            p:SetEndSize(0)
-            p:SetColor(255, m_random(160, 255), m_random(40, 100))
-            p:SetGravity(Vector(0, 0, -60))
-            p:SetAirResistance(100)
-        end
-    end
-
-    emitter:Finish()
 end
 
 -- ─── Net: new projectile ──────────────────────────────────────────────────────
@@ -397,7 +339,6 @@ local function render_projectiles()
     end
 
     -- ─ visual ricochets ─
-    -- Brighter and wider than real bullets; linear alpha fade over lifetime.
     local visuals = rico_store.active_visuals
     local vc      = #visuals
     if vc > 0 then
@@ -412,33 +353,24 @@ local function render_projectiles()
             local render_pos = Vector(rx, ry, rz)
             local tail_end   = r.old_pos
 
-            -- life_frac: 1.0 at birth, 0.0 at die_time.
             local life_frac = m_clamp((r.die_time - now) / RICO_DUR_MAX, 0, 1)
 
-            -- Alpha values exceed real bullet levels intentionally — ricochets
-            -- are brighter, more vivid, like a hot spark skipping off steel.
-            local alpha_core = life_frac * 255   -- same peak as real bullet core
-            local alpha_halo = life_frac * 160   -- was 80, now 160 (brighter halo)
-            local alpha_glow = life_frac * 220   -- was 130, now 220 (much brighter bloom)
-            local alpha_tip  = life_frac * 255   -- was 200, now full 255
+            local alpha_core = life_frac * 255
+            local alpha_halo = life_frac * 160
+            local alpha_glow = life_frac * 220
+            local alpha_tip  = life_frac * 255
 
             local dist  = m_sqrt(cam_pos:DistToSqr(render_pos))
-            -- Scale range raised: 1.2–4.5 vs real bullet 1.5–5.
-            -- Rico beams are wider per-unit than real bullets (wider coefficients below).
             local scale = m_clamp(dist / 1200, 1.2, 4.5)
 
             render.SetMaterial(mat_beam)
             if render_pos:DistToSqr(tail_end) > 4 then
-                -- Core: 8 * scale vs real bullet 6 * scale — thicker hot core
                 render.DrawBeam(tail_end, render_pos, 8 * scale, 0, 1, Color(255, 60, 20, alpha_core))
             end
-            -- Halo: 24 * scale vs real bullet 18 * scale — wider bleed
             render.DrawBeam(tail_end, render_pos, 24 * scale, 0, 1, Color(220, 10, 0, alpha_halo))
 
             render.SetMaterial(mat_glow)
-            -- Outer bloom: 80 * scale vs real bullet 60 * scale
             render.DrawSprite(render_pos, 80 * scale, 80 * scale, Color(255, 60, 0, alpha_glow))
-            -- Hot tip: 22 * scale vs real bullet 16 * scale
             render.DrawSprite(render_pos, 22 * scale, 22 * scale, Color(255, 220, 200, alpha_tip))
         end
     end
@@ -497,53 +429,6 @@ local function SpawnDustPuff(hitPos, hitNormal)
     emitter:Finish()
 end
 
-local function SpawnGroundIgnition(hitPos, hitNormal)
-    local emitter = ParticleEmitter(hitPos, false)
-    if not emitter then return end
-
-    -- 8 fire core particles rising along the surface normal.
-    for _ = 1, 8 do
-        local p = emitter:Add("particle/fire", hitPos)
-        if p then
-            local scatter = VectorRand() * 12
-            scatter.z = m_abs(scatter.z)
-            p:SetVelocity(hitNormal * m_rand(30, 90) + scatter)
-            p:SetLifeTime(0)
-            p:SetDieTime(m_rand(0.18, 0.45))
-            p:SetStartAlpha(m_random(180, 255))
-            p:SetEndAlpha(0)
-            p:SetStartSize(m_rand(6, 14))
-            p:SetEndSize(m_rand(18, 36))
-            p:SetRoll(m_rand(0, 360))
-            p:SetRollDelta(m_rand(-2.5, 2.5))
-            p:SetColor(255, m_random(80, 180), m_random(0, 40))
-            p:SetGravity(Vector(0, 0, 20))
-            p:SetAirResistance(40)
-        end
-    end
-
-    -- 5 ember sparks scattering wider and dying fast.
-    for _ = 1, 5 do
-        local p = emitter:Add("particle/fire", hitPos)
-        if p then
-            local scatter = VectorRand() * 30
-            scatter.z = m_abs(scatter.z)
-            p:SetVelocity(hitNormal * m_rand(10, 40) + scatter)
-            p:SetLifeTime(0)
-            p:SetDieTime(m_rand(0.08, 0.22))
-            p:SetStartAlpha(255)
-            p:SetEndAlpha(0)
-            p:SetStartSize(m_rand(2, 5))
-            p:SetEndSize(0)
-            p:SetColor(255, m_random(160, 255), m_random(40, 100))
-            p:SetGravity(Vector(0, 0, -60))
-            p:SetAirResistance(100)
-        end
-    end
-
-    emitter:Finish()
-end
-
 net.Receive("ac47_bullet_impact", function()
     local hitPos    = net.ReadVector()
     local hitNormal = net.ReadVector()
@@ -554,11 +439,9 @@ net.Receive("ac47_bullet_impact", function()
     SpawnDustPuff(hitPos, hitNormal)
     sound.Play(IMPACT_SOUNDS[sndIdx], hitPos, 75, m_random(95, 110), 1.0)
 
-    -- Single 0.9% roll drives BOTH the visual ricochet AND the ground ignition.
-    -- They are always paired: ricochet implies a hot impact, ignition implies a skip.
+    -- Visual ricochet tracer only. The ignited gib is handled server-side in init.lua.
     if m_random() < RICO_CHANCE then
         spawn_visual_rico(hitPos, hitNormal)
-        SpawnGroundIgnition(hitPos, hitNormal)
     end
 end)
 

@@ -2,13 +2,19 @@ AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
--- ─── Constants ───────────────────────────────────────────────────────────────────
+-- ─── Constants ─────────────────────────────────────────────────────────────────────────
 local MUZZLE_VEL = 46000
 local MAX_DIST   = 45000
 local MIN_SPEED  = 200
 local BLAST_DMG  = 18
 local BLAST_RAD  = 20
 local FORCE_MUL  = 3.0
+
+-- Same probability as the client-side visual ricochet roll.
+-- Both rolls are independent; a gib can appear without a visible tracer ricochet
+-- and vice versa, but in practice they will very often coincide.
+local GIB_RICO_CHANCE = 0.009
+local GIB_MODEL       = "models/gibs/wood_gib01e.mdl"
 
 local IMPACT_SOUNDS = {
     "physics/concrete/impact_bullet1.wav",
@@ -22,6 +28,7 @@ local IMPACT_SOUNDS = {
     "physics/metal/metal_solid_impact_bullet3.wav",
 }
 for _, s in ipairs(IMPACT_SOUNDS) do util.PrecacheSound(s) end
+util.PrecacheModel(GIB_MODEL)
 
 -- ─── Shared projectile store ─────────────────────────────────────────────────────
 ac47_m134_store = ac47_m134_store or {
@@ -52,7 +59,81 @@ end
 util.AddNetworkString("ac47_m134_projectile")
 util.AddNetworkString("ac47_bullet_impact")
 
--- ─── Spawn function ──────────────────────────────────────────────────────────────
+-- ─── Ignited gib spawner ────────────────────────────────────────────────────────────
+-- Spawns one wood_gib01e at hitPos, kicks it off the surface with a random
+-- tumble, then immediately ignites it permanently (lifetime = 0 = infinite).
+-- Called server-side on the same 0.9% probability as the client tracer ricochet.
+local function SpawnIgnitedGib(hitPos, hitNormal)
+    local gib = ents.Create("prop_physics")
+    if not IsValid(gib) then return end
+
+    gib:SetModel(GIB_MODEL)
+
+    -- Offset slightly off the surface so it doesn\'t start inside the geometry.
+    gib:SetPos(hitPos + hitNormal * 3)
+
+    -- Random facing angle so each gib looks unique.
+    gib:SetAngles(Angle(
+        math.random(0, 360),
+        math.random(0, 360),
+        math.random(0, 360)
+    ))
+    gib:Spawn()
+    gib:Activate()
+
+    local phys = gib:GetPhysicsObject()
+    if IsValid(phys) then
+        phys:Wake()
+
+        -- Launch direction: bounce off the surface normal with a wide random cone.
+        -- We build a random hemisphere direction the same way cl_init does for tracers.
+        local nx, ny, nz = hitNormal.x, hitNormal.y, hitNormal.z
+
+        -- Perpendicular helper.
+        local helper
+        if math.abs(nz) < 0.9 then
+            helper = Vector(0, 0, 1)
+        else
+            helper = Vector(1, 0, 0)
+        end
+        local tangent   = hitNormal:Cross(helper)  tangent:Normalize()
+        local bitangent = hitNormal:Cross(tangent) bitangent:Normalize()
+
+        -- Uniform hemisphere sample (cos_theta in [0,1] gives upper hemisphere).
+        local cos_theta = math.random()
+        local sin_theta = math.sqrt(1 - cos_theta * cos_theta)
+        local phi       = math.random() * (2 * math.pi)
+        local cp        = math.cos(phi)
+        local sp        = math.sin(phi)
+
+        local dx = nx * cos_theta + tangent.x * (sin_theta * cp) + bitangent.x * (sin_theta * sp)
+        local dy = ny * cos_theta + tangent.y * (sin_theta * cp) + bitangent.y * (sin_theta * sp)
+        local dz = nz * cos_theta + tangent.z * (sin_theta * cp) + bitangent.z * (sin_theta * sp)
+        local dlen = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if dlen < 0.001 then
+            gib:Remove()
+            return
+        end
+        dx = dx / dlen  dy = dy / dlen  dz = dz / dlen
+
+        -- Speed: fast enough to visibly tumble and arc, not so fast it flies off-screen.
+        local speed = math.Rand(120, 340)
+        phys:SetVelocity(Vector(dx * speed, dy * speed, dz * speed))
+
+        -- Random angular velocity for realistic tumble on all axes.
+        phys:SetAngleVelocity(Vector(
+            math.Rand(-400, 400),
+            math.Rand(-400, 400),
+            math.Rand(-400, 400)
+        ))
+    end
+
+    -- Ignite permanently: lifetime 0 = never extinguishes naturally.
+    -- The gib will burn until it is removed or the world is cleaned.
+    gib:Ignite(0, 0)
+end
+
+-- ─── Spawn function ─────────────────────────────────────────────────────────────────
 function ac47_m134_spawn(shooter, firer_ent, pos, dir, damage, blast_radius)
     local store    = ac47_m134_store
     local proj_idx = bit.band(store.last_idx, store.buffer_size - 1) + 1
@@ -99,6 +180,12 @@ local function apply_impact_fx(proj, tr)
         net.WriteVector(tr.HitNormal)
         net.WriteUInt(sndIdx, 8)
     net.Broadcast()
+
+    -- 0.9% roll: spawn a permanently ignited wood gib bouncing off the surface.
+    -- Server-side because Ignite() and prop_physics creation are server-only.
+    if math.random() < GIB_RICO_CHANCE then
+        SpawnIgnitedGib(hitPos, tr.HitNormal)
+    end
 end
 
 local function apply_damage(proj, tr)
