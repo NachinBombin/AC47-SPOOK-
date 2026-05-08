@@ -33,16 +33,12 @@ end
 ac47_ambient_loops = ac47_ambient_loops or {}
 
 -- ─── Visual ricochet store ─────────────────────────────────────────────────────
--- Purely cosmetic fake tracers spawned on a 0.9% roll at impact.
--- No collision, no damage, no server involvement whatsoever.
--- Each slot stores a moving point + a die_time; when CurTime() >= die_time
--- the slot is evicted from active_visuals using the same swap-remove pattern.
-local RICO_CHANCE     = 0.009
-local RICO_SPEED_MIN  = 8000
-local RICO_SPEED_MAX  = 18000
-local RICO_DUR_MIN    = 0.06
-local RICO_DUR_MAX    = 0.18
-local RICO_BUF_SIZE   = 32   -- power-of-two for fast band masking
+local RICO_CHANCE    = 0.009
+local RICO_SPEED_MIN = 8000
+local RICO_SPEED_MAX = 18000
+local RICO_DUR_MIN   = 0.30   -- was 0.06
+local RICO_DUR_MAX   = 0.70   -- was 0.18
+local RICO_BUF_SIZE  = 32
 
 local rico_store = {
     last_idx       = 0,
@@ -62,7 +58,7 @@ do
     end
 end
 
--- Pre-cached math upvalues used in the hot render/move paths.
+-- Pre-cached math upvalues.
 local m_random = math.random
 local m_rand   = math.Rand
 local m_sqrt   = math.sqrt
@@ -71,17 +67,12 @@ local m_abs    = math.abs
 local m_pi     = math.pi
 local m_cos    = math.cos
 local m_sin    = math.sin
-local m_rad    = math.rad
 
--- Spawn one visual ricochet originating from hitPos in a random upper-hemisphere
--- direction relative to hitNormal. Full hemisphere (90 deg cone) — purely decorative.
 local function spawn_visual_rico(hitPos, hitNormal)
     local store    = rico_store
     local slot_idx = bit.band(store.last_idx, RICO_BUF_SIZE - 1) + 1
     local slot     = store.buffer[slot_idx]
 
-    -- Build orthonormal basis around hitNormal (same method as before,
-    -- but cone is full 90 deg so cos_max = 0 — entire hemisphere).
     local helper
     if m_abs(hitNormal.z) < 0.9 then
         helper = Vector(0, 0, 1)
@@ -91,8 +82,7 @@ local function spawn_visual_rico(hitPos, hitNormal)
     local tangent   = hitNormal:Cross(helper)  tangent:Normalize()
     local bitangent = hitNormal:Cross(tangent) bitangent:Normalize()
 
-    -- Uniform spherical-cap sample over the full hemisphere (cos_max = 0).
-    local cos_theta = m_random()                               -- [0, 1]
+    local cos_theta = m_random()
     local sin_theta = m_sqrt(1 - cos_theta * cos_theta)
     local phi       = m_random() * (2 * m_pi)
     local cp        = m_cos(phi)
@@ -101,22 +91,79 @@ local function spawn_visual_rico(hitPos, hitNormal)
     local dx = hitNormal.x * cos_theta + tangent.x * (sin_theta * cp) + bitangent.x * (sin_theta * sp)
     local dy = hitNormal.y * cos_theta + tangent.y * (sin_theta * cp) + bitangent.y * (sin_theta * sp)
     local dz = hitNormal.z * cos_theta + tangent.z * (sin_theta * cp) + bitangent.z * (sin_theta * sp)
-    -- Normalize inline (length is already ~1 from spherical sampling but float drift possible).
     local len = m_sqrt(dx*dx + dy*dy + dz*dz)
     if len < 0.001 then return end
     dx = dx / len  dy = dy / len  dz = dz / len
 
     local spd = m_rand(RICO_SPEED_MIN, RICO_SPEED_MAX)
 
-    slot.dead        = false
-    slot.die_time    = CurTime() + m_rand(RICO_DUR_MIN, RICO_DUR_MAX)
-    slot.pos.x       = hitPos.x  slot.pos.y  = hitPos.y  slot.pos.z  = hitPos.z
-    slot.old_pos.x   = hitPos.x  slot.old_pos.y = hitPos.y  slot.old_pos.z = hitPos.z
-    slot.vel.x       = dx * spd  slot.vel.y  = dy * spd  slot.vel.z  = dz * spd
-    slot.old_vel.x   = slot.vel.x  slot.old_vel.y = slot.vel.y  slot.old_vel.z = slot.vel.z
+    slot.dead      = false
+    slot.die_time  = CurTime() + m_rand(RICO_DUR_MIN, RICO_DUR_MAX)
+    slot.pos.x     = hitPos.x    slot.pos.y     = hitPos.y    slot.pos.z     = hitPos.z
+    slot.old_pos.x = hitPos.x    slot.old_pos.y = hitPos.y    slot.old_pos.z = hitPos.z
+    slot.vel.x     = dx * spd    slot.vel.y     = dy * spd    slot.vel.z     = dz * spd
+    slot.old_vel.x = slot.vel.x  slot.old_vel.y = slot.vel.y  slot.old_vel.z = slot.vel.z
 
     store.last_idx = store.last_idx + 1
     store.active_visuals[#store.active_visuals + 1] = slot
+end
+
+-- ─── Ground ignition ──────────────────────────────────────────────────────────────
+-- Purely cosmetic fire burst at the impact point.
+-- Uses ParticleEmitter with the stock HL2 fire sprite
+-- ("particle/fire" is always available, no addon needed).
+-- Spawns on the same 0.9% roll as the visual ricochet.
+local function SpawnGroundIgnition(hitPos, hitNormal)
+    local emitter = ParticleEmitter(hitPos, false)
+    if not emitter then return end
+
+    -- Fire core: 8 bright orange-yellow particles rising along the normal.
+    for _ = 1, 8 do
+        local p = emitter:Add("particle/fire", hitPos)
+        if p then
+            local scatter = VectorRand() * 12
+            scatter.z = m_abs(scatter.z)  -- bias upward
+            local vel = hitNormal * m_rand(30, 90) + scatter
+            p:SetVelocity(vel)
+            p:SetLifeTime(0)
+            p:SetDieTime(m_rand(0.18, 0.45))
+            p:SetStartAlpha(m_random(180, 255))
+            p:SetEndAlpha(0)
+            p:SetStartSize(m_rand(6, 14))
+            p:SetEndSize(m_rand(18, 36))
+            p:SetRoll(m_rand(0, 360))
+            p:SetRollDelta(m_rand(-2.5, 2.5))
+            -- Hot orange-white fire tint.
+            p:SetColor(
+                255,
+                m_random(80, 180),
+                m_random(0,  40)
+            )
+            p:SetGravity(Vector(0, 0, 20))   -- fire rises
+            p:SetAirResistance(40)
+        end
+    end
+
+    -- Ember sparks: 5 tiny bright white-orange points that scatter wider.
+    for _ = 1, 5 do
+        local p = emitter:Add("particle/fire", hitPos)
+        if p then
+            local scatter = VectorRand() * 30
+            scatter.z = m_abs(scatter.z)
+            p:SetVelocity(hitNormal * m_rand(10, 40) + scatter)
+            p:SetLifeTime(0)
+            p:SetDieTime(m_rand(0.08, 0.22))
+            p:SetStartAlpha(255)
+            p:SetEndAlpha(0)
+            p:SetStartSize(m_rand(2, 5))
+            p:SetEndSize(0)
+            p:SetColor(255, m_random(160, 255), m_random(40, 100))
+            p:SetGravity(Vector(0, 0, -60))
+            p:SetAirResistance(100)
+        end
+    end
+
+    emitter:Finish()
 end
 
 -- ─── Net: new projectile ──────────────────────────────────────────────────────
@@ -270,12 +317,11 @@ local function move_cl()
     while vi <= vc do
         local r = visuals[vi]
         if r.dead or now >= r.die_time then
-            r.dead       = true
-            visuals[vi]  = visuals[vc]
-            visuals[vc]  = nil
+            r.dead      = true
+            visuals[vi] = visuals[vc]
+            visuals[vc] = nil
             vc = vc - 1
         else
-            -- Straight-line movement, no gravity. Purely cosmetic.
             r.old_pos.x = r.pos.x  r.old_pos.y = r.pos.y  r.old_pos.z = r.pos.z
             r.old_vel.x = r.vel.x  r.old_vel.y = r.vel.y  r.old_vel.z = r.vel.z
             r.pos.x = r.pos.x + r.vel.x * tick_interval
@@ -351,8 +397,7 @@ local function render_projectiles()
     end
 
     -- ─ visual ricochets ─
-    -- Same beam/glow layers as real bullets but smaller scale and dimmer alpha
-    -- so they read as secondary fragments, not new incoming rounds.
+    -- Brighter and wider than real bullets; linear alpha fade over lifetime.
     local visuals = rico_store.active_visuals
     local vc      = #visuals
     if vc > 0 then
@@ -361,33 +406,40 @@ local function render_projectiles()
             local r = visuals[i]
             if r.dead or now >= r.die_time then continue end
 
-            -- Linear interpolation between old_pos and pos (no Hermite needed
-            -- for a dumb straight-line visual — cheaper and imperceptible difference).
             local rx = r.old_pos.x + (r.pos.x - r.old_pos.x) * interp_frac
             local ry = r.old_pos.y + (r.pos.y - r.old_pos.y) * interp_frac
             local rz = r.old_pos.z + (r.pos.z - r.old_pos.z) * interp_frac
             local render_pos = Vector(rx, ry, rz)
             local tail_end   = r.old_pos
 
-            -- Fade out linearly over lifetime so the streak dies gracefully.
-            local life_frac  = m_clamp((r.die_time - now) / (RICO_DUR_MAX), 0, 1)
-            local alpha_core = life_frac * 200   -- dim vs real bullet (255)
-            local alpha_halo = life_frac * 80    -- dim vs real bullet (110)
-            local alpha_glow = life_frac * 130   -- dim vs real bullet (180)
+            -- life_frac: 1.0 at birth, 0.0 at die_time.
+            local life_frac = m_clamp((r.die_time - now) / RICO_DUR_MAX, 0, 1)
+
+            -- Alpha values exceed real bullet levels intentionally — ricochets
+            -- are brighter, more vivid, like a hot spark skipping off steel.
+            local alpha_core = life_frac * 255   -- same peak as real bullet core
+            local alpha_halo = life_frac * 160   -- was 80, now 160 (brighter halo)
+            local alpha_glow = life_frac * 220   -- was 130, now 220 (much brighter bloom)
+            local alpha_tip  = life_frac * 255   -- was 200, now full 255
 
             local dist  = m_sqrt(cam_pos:DistToSqr(render_pos))
-            -- Smaller scale cap (3 vs 5) — visual ricochets are shorter streaks.
-            local scale = m_clamp(dist / 1200, 0.8, 3)
+            -- Scale range raised: 1.2–4.5 vs real bullet 1.5–5.
+            -- Rico beams are wider per-unit than real bullets (wider coefficients below).
+            local scale = m_clamp(dist / 1200, 1.2, 4.5)
 
             render.SetMaterial(mat_beam)
             if render_pos:DistToSqr(tail_end) > 4 then
-                render.DrawBeam(tail_end, render_pos, 5 * scale, 0, 1, Color(255, 30, 10, alpha_core))
+                -- Core: 8 * scale vs real bullet 6 * scale — thicker hot core
+                render.DrawBeam(tail_end, render_pos, 8 * scale, 0, 1, Color(255, 60, 20, alpha_core))
             end
-            render.DrawBeam(tail_end, render_pos, 14 * scale, 0, 1, Color(200, 0, 0, alpha_halo))
+            -- Halo: 24 * scale vs real bullet 18 * scale — wider bleed
+            render.DrawBeam(tail_end, render_pos, 24 * scale, 0, 1, Color(220, 10, 0, alpha_halo))
 
             render.SetMaterial(mat_glow)
-            render.DrawSprite(render_pos, 40 * scale, 40 * scale, Color(255, 40, 0, alpha_glow))
-            render.DrawSprite(render_pos, 10 * scale, 10 * scale, Color(255, 200, 180, life_frac * 200))
+            -- Outer bloom: 80 * scale vs real bullet 60 * scale
+            render.DrawSprite(render_pos, 80 * scale, 80 * scale, Color(255, 60, 0, alpha_glow))
+            -- Hot tip: 22 * scale vs real bullet 16 * scale
+            render.DrawSprite(render_pos, 22 * scale, 22 * scale, Color(255, 220, 200, alpha_tip))
         end
     end
 end
@@ -445,6 +497,53 @@ local function SpawnDustPuff(hitPos, hitNormal)
     emitter:Finish()
 end
 
+local function SpawnGroundIgnition(hitPos, hitNormal)
+    local emitter = ParticleEmitter(hitPos, false)
+    if not emitter then return end
+
+    -- 8 fire core particles rising along the surface normal.
+    for _ = 1, 8 do
+        local p = emitter:Add("particle/fire", hitPos)
+        if p then
+            local scatter = VectorRand() * 12
+            scatter.z = m_abs(scatter.z)
+            p:SetVelocity(hitNormal * m_rand(30, 90) + scatter)
+            p:SetLifeTime(0)
+            p:SetDieTime(m_rand(0.18, 0.45))
+            p:SetStartAlpha(m_random(180, 255))
+            p:SetEndAlpha(0)
+            p:SetStartSize(m_rand(6, 14))
+            p:SetEndSize(m_rand(18, 36))
+            p:SetRoll(m_rand(0, 360))
+            p:SetRollDelta(m_rand(-2.5, 2.5))
+            p:SetColor(255, m_random(80, 180), m_random(0, 40))
+            p:SetGravity(Vector(0, 0, 20))
+            p:SetAirResistance(40)
+        end
+    end
+
+    -- 5 ember sparks scattering wider and dying fast.
+    for _ = 1, 5 do
+        local p = emitter:Add("particle/fire", hitPos)
+        if p then
+            local scatter = VectorRand() * 30
+            scatter.z = m_abs(scatter.z)
+            p:SetVelocity(hitNormal * m_rand(10, 40) + scatter)
+            p:SetLifeTime(0)
+            p:SetDieTime(m_rand(0.08, 0.22))
+            p:SetStartAlpha(255)
+            p:SetEndAlpha(0)
+            p:SetStartSize(m_rand(2, 5))
+            p:SetEndSize(0)
+            p:SetColor(255, m_random(160, 255), m_random(40, 100))
+            p:SetGravity(Vector(0, 0, -60))
+            p:SetAirResistance(100)
+        end
+    end
+
+    emitter:Finish()
+end
+
 net.Receive("ac47_bullet_impact", function()
     local hitPos    = net.ReadVector()
     local hitNormal = net.ReadVector()
@@ -455,9 +554,11 @@ net.Receive("ac47_bullet_impact", function()
     SpawnDustPuff(hitPos, hitNormal)
     sound.Play(IMPACT_SOUNDS[sndIdx], hitPos, 75, m_random(95, 110), 1.0)
 
-    -- 0.9% chance: spawn one purely visual ricochet tracer.
+    -- Single 0.9% roll drives BOTH the visual ricochet AND the ground ignition.
+    -- They are always paired: ricochet implies a hot impact, ignition implies a skip.
     if m_random() < RICO_CHANCE then
         spawn_visual_rico(hitPos, hitNormal)
+        SpawnGroundIgnition(hitPos, hitNormal)
     end
 end)
 
