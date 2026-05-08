@@ -184,6 +184,11 @@ hook.Add("CreateMove", "ac47_m134_move_cl", function()
 end)
 
 -- ─── Tracer renderer ──────────────────────────────────────────────────────────
+-- AC-47 Spooky tracers are RED to visually distinguish from the AC-130's orange.
+-- Core beam  : Color(255, 30,  10, 255)  -- bright red
+-- Halo beam  : Color(200,  0,   0, 110)  -- deep red, semi-transparent
+-- Outer glow : Color(255,  40,  0, 180)  -- red-orange outer bloom
+-- Hot core   : Color(255, 200, 180, 255) -- near-white hot tip (unchanged)
 local function render_projectiles()
     local active = ac47_m134_store.active_projectiles
     local count  = #active
@@ -229,13 +234,17 @@ local function render_projectiles()
 
         render.SetMaterial(mat_beam)
         if render_pos:DistToSqr(tail_end) > 4 then
-            render.DrawBeam(tail_end, render_pos, 6 * scale, 0, 1, Color(255, 240, 180, 255))
+            -- Bright red core beam (was orange: 255, 240, 180)
+            render.DrawBeam(tail_end, render_pos, 6 * scale, 0, 1, Color(255, 30, 10, 255))
         end
-        render.DrawBeam(tail_end, render_pos, 18 * scale, 0, 1, Color(255, 100, 0, 100))
+        -- Deep red halo (was orange: 255, 100, 0)
+        render.DrawBeam(tail_end, render_pos, 18 * scale, 0, 1, Color(200, 0, 0, 110))
 
         render.SetMaterial(mat_glow)
-        render.DrawSprite(render_pos, 60 * scale, 60 * scale, Color(255, 140, 20, 180))
-        render.DrawSprite(render_pos, 16 * scale, 16 * scale, Color(255, 255, 200, 255))
+        -- Red outer bloom (was orange: 255, 140, 20)
+        render.DrawSprite(render_pos, 60 * scale, 60 * scale, Color(255, 40, 0, 180))
+        -- Hot near-white core tip (kept similar, slight red shift from 255,255,200)
+        render.DrawSprite(render_pos, 16 * scale, 16 * scale, Color(255, 200, 180, 255))
     end
 end
 
