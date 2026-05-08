@@ -1,13 +1,24 @@
 -- ============================================================
 -- TRAIL SYSTEM  --  ent_ac47_spooky
 -- ============================================================
+-- Source Engine local-space axes for an aircraft entity:
+--   X = forward  (nose -> tail is negative X)
+--   Y = right    (starboard is positive Y)
+--   Z = up
+--
+-- Three emitters:
+--   [1] Left  wingtip  : large -Y offset, slightly behind center
+--   [2] Right wingtip  : large +Y offset, slightly behind center
+--   [3] Fuselage body  : near the tail on the centre-line
+-- ============================================================
 
 local TRAIL_MATERIAL = Material("trails/smoke")
 local SAMPLE_RATE    = 0.025
 
 local TRAIL_POSITIONS = {
-    Vector( -200, 15, -4 ),   -- left wingtip
-    Vector(  200, 15, -4 ),   -- right wingtip
+    Vector( -30, -220, -4 ),   -- left  wingtip  (far -Y)
+    Vector( -30,  220, -4 ),   -- right wingtip  (far +Y)
+    Vector( -60,    0,  0 ),   -- fuselage body  (centre, trailing edge)
 }
 
 local TIER_CONFIG = {
@@ -32,11 +43,11 @@ local function EnsureRegistered(entIndex)
     }
 end
 
--- FIX BUG 2: EnsureRegistered is called BEFORE the nil-check so that a
--- damage-tier net message arriving in the same frame the entity is first
--- seen will correctly record the tier rather than silently dropping it.
+-- EnsureRegistered is called BEFORE the nil-check so that a damage-tier
+-- net message arriving in the same frame the entity is first seen will
+-- correctly record the tier rather than silently dropping it.
 function AC47TrailSystem_SetTier(entIndex, tier)
-    EnsureRegistered(entIndex)   -- was missing; tier was lost if state didn't exist yet
+    EnsureRegistered(entIndex)
     local state = AC47Trails[entIndex]
     if not state then return end
     state.tier = tier
