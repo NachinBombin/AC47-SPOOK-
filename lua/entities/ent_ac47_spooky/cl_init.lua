@@ -18,6 +18,11 @@ local GUN_WAVS = {
     "lfs/tfre_ac47/m134_shoot3.wav",
 }
 
+-- Subtle pitch offsets per gun.
+-- Gun 1 = reference, Gun 2 = ~half semitone down, Gun 3 = ~half semitone up.
+-- Spread of ±3 is subliminal on looping MG audio; ear reads texture not tuning.
+local GUN_PITCHES = { 100, 97, 103 }
+
 -- ============================================================
 -- ENGINE AMBIENT LOOP
 -- ============================================================
@@ -45,7 +50,6 @@ net.Receive("ac47_plane_spatial_sound", function()
             end
         end
     else
-        -- One-shot positional sounds (e.g. engine_start)
         sound.Play(sndPath, nearPos, level, pitch, volume)
     end
 end)
@@ -72,14 +76,13 @@ net.Receive("ac47_gun_sound", function()
     local handles = ac47_gun_sounds[entIndex]
 
     if isStart then
-        -- Only create a new handle if one isn't already playing
         if not handles[gunIdx] then
             local wav = GUN_WAVS[gunIdx]
             if not wav then return end
             local snd = CreateSound(ent, wav)
             if snd then
                 snd:SetSoundLevel(150)
-                snd:PlayEx(1.0, 100)
+                snd:PlayEx(1.0, GUN_PITCHES[gunIdx] or 100)
                 handles[gunIdx] = snd
             end
         end
@@ -200,11 +203,9 @@ net.Receive("ac47_plane_damage_tier", function()
     AC47TrailSystem_SetTier(entIndex, tier)
 
     if tier == 0 then
-        -- Stop engine loop
         local snd = ac47_ambient_loops[entIndex]
         if snd then snd:Stop() end
         ac47_ambient_loops[entIndex] = nil
-        -- Stop ALL gun sounds (plane is dead/silent)
         local handles = ac47_gun_sounds[entIndex]
         if handles then
             for _, h in pairs(handles) do

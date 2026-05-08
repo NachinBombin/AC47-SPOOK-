@@ -27,7 +27,7 @@ hook.Add("PostDrawTranslucentRenderables", "ac47_muzzle_flash_draw", function(de
     render.SetMaterial(mat_flash)
     for _, f in ipairs(muzzle_flashes) do
         if ct > f.expire then continue end
-        local sz = math.Clamp(30 + eye:Distance(f.pos) * 0.007, 30, 100)
+        local sz = math.Clamp(120 + eye:Distance(f.pos) * 0.028, 120, 400)
         render.DrawSprite(f.pos, sz, sz, Color(255, 220, 100, 255))
         keep[#keep + 1] = f
     end
