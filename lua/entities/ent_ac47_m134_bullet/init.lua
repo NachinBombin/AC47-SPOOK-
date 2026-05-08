@@ -10,33 +10,6 @@ local BLAST_DMG  = 18
 local BLAST_RAD  = 20
 local FORCE_MUL  = 3.0
 
--- ─── Ricochet ────────────────────────────────────────────────────────────────────
-local RICOCHET_CHANCE    = 0.02
-local RICOCHET_CONE      = 60
-local RICOCHET_DMG_MUL   = 0.35
-local RICOCHET_SPEED_MUL = 0.45
-
--- Pre-allocated flat pending queue. Each ricochet that wins the 2% roll
--- is written here during the move loop and spawned AFTER the loop exits.
--- Capacity: 32 ricochets per tick. At 2% chance with ~200 bullets/tick
--- the expected value is 4; 32 is an 8-sigma ceiling with zero alloc cost.
-local RICO_QUEUE_CAP = 32
-local rico_queue = {}
-local rico_queue_n = 0
-do
-    -- Pre-fill all slots so no table is ever created at runtime.
-    for i = 1, RICO_QUEUE_CAP do
-        rico_queue[i] = {
-            shooter      = NULL,
-            firer_ent    = NULL,
-            pos          = Vector(0,0,0),
-            dir          = Vector(0,0,0),
-            damage       = 0,
-            blast_radius = 0,
-        }
-    end
-end
-
 local IMPACT_SOUNDS = {
     "physics/concrete/impact_bullet1.wav",
     "physics/concrete/impact_bullet2.wav",
@@ -114,109 +87,13 @@ local function resolve_attacker(proj)
     return game.GetWorld()
 end
 
--- ─── Ricochet direction (uniform spherical-cap sampling) ─────────────────────────
--- Pre-cache math locals to avoid global table lookups in hot path.
-local m_abs    = math.abs
-local m_rad    = math.rad
-local m_cos    = math.cos
-local m_sqrt   = math.sqrt
-local m_random = math.random
-local m_pi     = math.pi
-
-local CONE_RAD  = m_rad(RICOCHET_CONE)
-local CONE_CMAX = m_cos(CONE_RAD)          -- precomputed; cone never changes
-
-local VEC_UP    = Vector(0, 0, 1)
-local VEC_RIGHT = Vector(1, 0, 0)
-
-local function ricochet_dir(normal)
-    -- Orthonormal basis around the surface normal.
-    local helper    = m_abs(normal.z) < 0.9 and VEC_UP or VEC_RIGHT
-    local tangent   = normal:Cross(helper)  tangent:Normalize()
-    local bitangent = normal:Cross(tangent) bitangent:Normalize()
-
-    -- Uniform spherical-cap sample: cosθ uniform in [CONE_CMAX, 1].
-    local cos_theta = CONE_CMAX + m_random() * (1 - CONE_CMAX)
-    local sin_theta = m_sqrt(1 - cos_theta * cos_theta)
-    local phi       = m_random() * (2 * m_pi)
-
-    local cp = m_cos(phi)
-    local sp = m_sqrt(1 - cp * cp) * (m_random() < 0.5 and 1 or -1)  -- sin(phi) with sign
-
-    local dir = normal    * cos_theta
-              + tangent   * (sin_theta * cp)
-              + bitangent * (sin_theta * sp)
-    dir:Normalize()
-    return dir
-end
-
--- ─── Queue a ricochet (called inside move loop — NO spawning here) ───────────────
-local function queue_ricochet(proj, tr)
-    -- 2% roll
-    if m_random() > RICOCHET_CHANCE then return end
-
-    -- Skip living entities and other projectiles.
-    local hit_ent = tr.Entity
-    if IsValid(hit_ent) then
-        if hit_ent:IsNPC() or hit_ent:IsPlayer() then return end
-        local cls = hit_ent:GetClass()
-        if cls == "ent_ac47_m134_bullet" or cls == "ent_bombin_gau_bullet" then return end
-    end
-
-    local normal = tr.HitNormal
-    if normal:LengthSqr() < 0.5 then return end
-
-    -- Queue cap guard — silently drop if somehow exceeded.
-    if rico_queue_n >= RICO_QUEUE_CAP then return end
-
-    rico_queue_n = rico_queue_n + 1
-    local slot = rico_queue[rico_queue_n]
-
-    -- Write into the pre-allocated slot. No new tables, no GC.
-    slot.shooter      = proj.shooter
-    slot.firer_ent    = proj.firer_ent
-    slot.damage       = math.max(1, math.floor(proj.damage * RICOCHET_DMG_MUL))
-    slot.blast_radius = proj.blast_radius
-
-    -- Compute direction and spawn pos now (while tr is still in scope),
-    -- store into the slot's pre-existing Vector objects to avoid allocation.
-    local rdir = ricochet_dir(normal)
-    slot.dir.x = rdir.x  slot.dir.y = rdir.y  slot.dir.z = rdir.z
-    local sp = tr.HitPos + normal * 4
-    slot.pos.x = sp.x    slot.pos.y = sp.y    slot.pos.z = sp.z
-end
-
--- ─── Drain the pending ricochet queue (called after move loop) ──────────────────
-local function drain_rico_queue()
-    if rico_queue_n == 0 then return end
-    local active = ac47_m134_store.active_projectiles
-    for i = 1, rico_queue_n do
-        local s = rico_queue[i]
-        ac47_m134_spawn(s.shooter, s.firer_ent, s.pos, s.dir, s.damage, s.blast_radius)
-        -- Reduce speed of the just-appended ricochet bullet.
-        local rico = active[#active]
-        if rico and not rico.hit then
-            local spd    = MUZZLE_VEL * RICOCHET_SPEED_MUL
-            rico.speed   = spd
-            rico.vel.x   = s.dir.x * spd
-            rico.vel.y   = s.dir.y * spd
-            rico.vel.z   = s.dir.z * spd
-            rico.old_vel.x = rico.vel.x
-            rico.old_vel.y = rico.vel.y
-            rico.old_vel.z = rico.vel.z
-        end
-    end
-    -- Reset counter — slots are reused next tick, no wipe needed.
-    rico_queue_n = 0
-end
-
 local function apply_impact_fx(proj, tr)
     local hitPos   = tr.HitPos
     local attacker = resolve_attacker(proj)
 
     util.BlastDamage(attacker, attacker, hitPos, proj.blast_radius, proj.damage)
 
-    local sndIdx = m_random(#IMPACT_SOUNDS)
+    local sndIdx = math.random(#IMPACT_SOUNDS)
     net.Start("ac47_bullet_impact")
         net.WriteVector(hitPos)
         net.WriteVector(tr.HitNormal)
@@ -265,8 +142,6 @@ local function move_projectile(proj)
             apply_damage(proj, tr)
         end
         apply_impact_fx(proj, tr)
-        -- Only queued here. Actual spawn happens in drain_rico_queue after loop.
-        queue_ricochet(proj, tr)
         return true
     end
 
@@ -289,9 +164,6 @@ hook.Add("Tick", "ac47_m134_move_sv", function()
             idx = idx + 1
         end
     end
-    -- Spawn all queued ricochets now that the move loop is finished.
-    -- active_projectiles can safely grow here.
-    drain_rico_queue()
 end)
 
 function ENT:Initialize()
