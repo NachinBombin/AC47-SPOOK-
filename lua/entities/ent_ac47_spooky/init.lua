@@ -140,14 +140,13 @@ local GUN_BARREL_STEP = 35
 local CTRL_SMOOTH     = 10
 
 -- ============================================================
--- TUMBLE / GIB CONSTANTS
+-- TUMBLE CONSTANTS  (matches Current-Ac-Model)
 -- ============================================================
 
-local TUMBLE_DURATION      = 12       -- seconds of tumble before crash explosion
-local TUMBLE_GRAVITY_SCALE = 1.0      -- multiplier applied to physenv gravity
-local GIB_LIFETIME         = 40       -- seconds before each gib is removed
+local TUMBLE_GRAVITY   = 600   -- units/s^2 downward acceleration during tumble
+local GIB_LIFETIME     = 40   -- seconds before each gib is removed
 
--- Same gib models as the AC-130 (b29 parts from the fonv pack)
+-- Same gib models as before
 local GIB_MODELS = {
     "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
     "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
@@ -228,6 +227,8 @@ function ENT:Initialize()
     self:SetAngles(Angle(0, ang.y - 90, 0))
     self.ang = self:GetAngles()
 
+    self.flightYaw = ang.y - 90
+
     self.AltDriftCurrent  = self.sky
     self.AltDriftTarget   = self.sky
     self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
@@ -285,13 +286,17 @@ function ENT:Initialize()
         }
     end
 
-    self.IsDestroyed    = false
-    self.DamageTier     = 0
-    -- Tumble state (ported from AN-71)
+    self.IsDestroyed = false
+    self.DamageTier  = 0
+
+    -- Tumble state (exact match to Current-Ac-Model)
     self.IsTumbling        = false
+    self.TumbleLastTime    = 0
+    self.TumbleGroundZ     = ground
+    self.TumbleCrashed     = false
+    self._CrashFired       = false
     self.TumbleVelocity    = Vector(0, 0, 0)
     self.TumbleAngVelocity = Vector(0, 0, 0)
-    self._CrashFired       = false
 
     self:Debug("Spawned at " .. tostring(spawnPos))
 end
@@ -336,97 +341,146 @@ function ENT:StopAllGunSounds()
 end
 
 -- ============================================================
--- DESTROY → TUMBLE → CRASH  (ported from AN-71)
+-- TUMBLE  (exact system from Current-Ac-Model)
 -- ============================================================
 
-function ENT:DestroyPlane()
-    if self.IsDestroyed then return end
-    self.IsDestroyed = true
-    self:StopAllGunSounds()
-    self:BroadcastDamageTier(3)   -- tier 3 = destroyed, drives heavy smoke on client
-    self:EmitSound("lfs/tfre_ac47/skytrain_engine_stop.wav", 125, 100, 1.0)
-    self:StartTumble()
-
-    -- Safety-net timer: if CrashExplode hasn't fired yet, call it.
-    -- Guards against entity-slot recycling by checking class.
-    local entIdx = self:EntIndex()
-    timer.Simple(TUMBLE_DURATION + 5, function()
-        local ent = Entity(entIdx)
-        if IsValid(ent)
-            and not ent:IsMarkedForDeletion()
-            and ent:GetClass() == "ent_ac47_spooky"
-            and not ent._CrashFired
-        then
-            ent:CrashExplode()
-        end
-    end)
-end
-
 function ENT:StartTumble()
-    self.IsTumbling = true
+    self.IsTumbling     = true
+    self.TumbleLastTime = CurTime()
+    self.TumbleCrashed  = false
 
-    -- Inherit current forward velocity and begin falling
-    local fwd = self:GetAngles():Forward()
-    self.TumbleVelocity = fwd * self.Speed
-    self.TumbleVelocity.z = -200
+    -- Refresh ground Z from current position
+    local gnd = self:FindGround(self:GetPos())
+    if gnd ~= -1 then self.TumbleGroundZ = gnd end
 
-    -- Random spin rates (degrees/s) matching AN-71 ranges
+    -- Inherit flight velocity + begin falling
+    local fwd = Angle(0, self.flightYaw or self.ang.y, 0):Forward()
+    local spd = self.Speed or 280
+    self.TumbleVelocity = Vector(fwd.x * spd, fwd.y * spd, -80)
+
+    -- Random tumble spin
+    local function sign() return (math.random(2) == 1) and 1 or -1 end
     self.TumbleAngVelocity = Vector(
-        math.Rand(-300, 300),   -- pitch spin
-        math.Rand(150, 400),    -- yaw spin
-        math.Rand(-250, 250)    -- roll spin
+        math.Rand(8,  18) * sign(),
+        math.Rand(3,   8) * sign(),
+        math.Rand(20, 40) * sign()
     )
 
-    -- Immediate impact effect at current position
-    local pos = self.LastPos or self:GetPos()
-    local ed = EffectData()
-    ed:SetOrigin(pos) ed:SetScale(5) ed:SetMagnitude(5) ed:SetRadius(500)
-    util.Effect("500lb_air", ed, true, true)
-    sound.Play("ambient/explosions/explode_8.wav", pos, 140, 90, 1.0)
+    -- Switch to MOVETYPE_NONE so we drive position manually
+    self:SetMoveType(MOVETYPE_NONE)
+    local phys = self:GetPhysicsObject()
+    if IsValid(phys) then
+        phys:EnableGravity(false)
+        phys:SetVelocity(Vector(0, 0, 0))
+        phys:SetAngleVelocity(Vector(0, 0, 0))
+        phys:Sleep()
+    end
 
-    -- Schedule the ground crash
-    local entIdx = self:EntIndex()
-    timer.Simple(TUMBLE_DURATION, function()
-        local ent = Entity(entIdx)
-        if IsValid(ent)
-            and not ent:IsMarkedForDeletion()
-            and ent:GetClass() == "ent_ac47_spooky"
-            and not ent._CrashFired
-        then
-            ent:CrashExplode()
-        end
-    end)
+    -- Initial hit effect
+    local pos = self:GetPos()
+    local ed  = EffectData()
+    ed:SetOrigin(pos) ed:SetScale(4) ed:SetMagnitude(4) ed:SetRadius(400)
+    util.Effect("500lb_air", ed, true, true)
+    sound.Play("ambient/explosions/explode_4.wav", pos, 135, 95, 1.0)
+end
+
+function ENT:UpdateTumble(ct)
+    if not IsValid(self) then return end
+    if not self.IsTumbling or self.TumbleCrashed then return end
+
+    local dt = ct - self.TumbleLastTime
+    self.TumbleLastTime = ct
+    if dt <= 0 or dt > 0.2 then return end
+
+    -- Apply gravity
+    self.TumbleVelocity.z = self.TumbleVelocity.z - TUMBLE_GRAVITY * dt
+
+    local pos    = self:GetPos()
+    local newPos = pos + self.TumbleVelocity * dt
+
+    -- Integrate angular velocity
+    local av = self.TumbleAngVelocity
+    self.ang = Angle(
+        self.ang.p + av.x * dt,
+        self.ang.y + av.y * dt,
+        self.ang.r + av.z * dt
+    )
+
+    -- Ground detection
+    local hitGround = newPos.z <= (self.TumbleGroundZ or -16384) + 200
+    local hitWall   = false
+    if not hitGround then
+        local tr = util.TraceLine({ start = pos, endpos = newPos, filter = self, mask = MASK_SOLID_BRUSHONLY })
+        hitWall = tr.HitWorld
+    end
+
+    if hitGround or hitWall then
+        -- Set flag BEFORE calling CrashExplode so any re-entrant path is blocked
+        self.TumbleCrashed = true
+        self:CrashExplode()
+        return
+    end
+
+    self:SetPos(newPos)
+    self:SetAngles(self.ang)
 end
 
 function ENT:CrashExplode()
+    -- Idempotency: only ever run once per entity lifetime
     if self._CrashFired then return end
-    self._CrashFired = true
+    self._CrashFired   = true
+    self.TumbleCrashed = true
 
-    local pos = self.LastPos or self:GetPos()
+    local pos    = Vector(self:GetPos())
+    local entIdx = self:EntIndex()
 
-    -- Multi-layer explosion VFX
-    local function boom(p, sc)
-        local ed = EffectData()
-        ed:SetOrigin(p) ed:SetScale(sc) ed:SetMagnitude(sc) ed:SetRadius(sc * 100)
-        util.Effect("HelicopterMegaBomb", ed, true, true)
+    local function BigBlast(bpos)
+        local ed1 = EffectData()
+        ed1:SetOrigin(bpos) ed1:SetScale(7) ed1:SetMagnitude(7) ed1:SetRadius(700)
+        util.Effect("HelicopterMegaBomb", ed1, true, true)
+
         local ed2 = EffectData()
-        ed2:SetOrigin(p) ed2:SetScale(sc) ed2:SetMagnitude(sc) ed2:SetRadius(sc * 100)
+        ed2:SetOrigin(bpos + Vector(0, 0,  90)) ed2:SetScale(6) ed2:SetMagnitude(6) ed2:SetRadius(600)
         util.Effect("500lb_air", ed2, true, true)
+
+        local ed3 = EffectData()
+        ed3:SetOrigin(bpos + Vector(0, 0, 200)) ed3:SetScale(5) ed3:SetMagnitude(5) ed3:SetRadius(500)
+        util.Effect("500lb_air", ed3, true, true)
+
+        sound.Play("ambient/explosions/explode_8.wav", bpos, 145, math.random(85, 95),  1.0)
+        sound.Play("ambient/explosions/explode_4.wav", bpos, 140, math.random(90, 105), 0.9)
+        util.BlastDamage(game.GetWorld(), game.GetWorld(), bpos, 450, 220)
     end
-    boom(pos, 8)
-    boom(pos + Vector(0, 0,  80), 5)
-    boom(pos + Vector(0, 0, 160), 4)
-    boom(pos + Vector(0, 0, 260), 3)
 
-    sound.Play("ambient/explosions/explode_8.wav", pos, 145, 80,  1.0)
-    sound.Play("weapon_AWP.Single",               pos, 148, 55,  1.0)
-    util.BlastDamage(self, self, pos, 450, 220)
-
+    BigBlast(pos)
     self:SpawnGibs(pos)
 
-    -- Small delay before removing the main hull so gibs have a frame to appear
-    local entIdx = self:EntIndex()
-    timer.Simple(0.1, function()
+    -- Cook-off blasts staggered like the AC-130
+    local delays  = { 0.9, 1.9, 3.1 }
+    local offsets = {
+        Vector( 280,   0,   0),
+        Vector(-300,   0,  60),
+        Vector(   0, 150, -40),
+    }
+    for i, delay in ipairs(delays) do
+        local off = offsets[i]
+        timer.Simple(delay, function()
+            local ent = Entity(entIdx)
+            local bpos
+            if IsValid(ent) and not ent:IsMarkedForDeletion() and ent:GetClass() == "ent_ac47_spooky" then
+                bpos = ent:GetPos()
+                    + ent:GetAngles():Forward() * off.x
+                    + ent:GetAngles():Right()   * off.y
+                    + ent:GetAngles():Up()      * off.z
+            else
+                bpos = pos + Vector(0, 0, -300 * delay)
+            end
+            BigBlast(bpos)
+        end)
+    end
+
+    -- Remove after last cook-off blast
+    timer.Simple(3.5, function()
         local ent = Entity(entIdx)
         if IsValid(ent) and ent:GetClass() == "ent_ac47_spooky" then
             ent:Remove()
@@ -435,30 +489,47 @@ function ENT:CrashExplode()
 end
 
 -- ============================================================
--- GIB SPAWNER
--- Each gib is staggered 0.1s apart to avoid a bulk-spawn lag spike.
--- Ignite is deferred one tick (timer.Simple(0)) after Activate so
--- the entity fire system is fully ready -- this is the reliable pattern.
+-- DESTROY
+-- ============================================================
+
+function ENT:DestroyPlane()
+    if self.IsDestroyed then return end
+    self.IsDestroyed = true
+    self:StopAllGunSounds()
+    self:BroadcastDamageTier(3)
+    self:EmitSound("lfs/tfre_ac47/skytrain_engine_stop.wav", 125, 100, 1.0)
+    self:StartTumble()
+
+    -- Safety-net: if plane never hits ground (spawned over void), force crash
+    local entIdx = self:EntIndex()
+    timer.Simple(20, function()
+        local ent = Entity(entIdx)
+        if IsValid(ent)
+            and not ent:IsMarkedForDeletion()
+            and ent:GetClass() == "ent_ac47_spooky"
+            and not ent._CrashFired
+        then
+            ent:CrashExplode()
+        end
+    end)
+end
+
+-- ============================================================
+-- GIB SPAWNER  (unchanged)
 -- ============================================================
 
 function ENT:SpawnGibs(origin)
     for idx, mdl in ipairs(GIB_MODELS) do
-        -- Stagger each gib by 0.1 s to avoid a single-frame physics spike
         timer.Simple((idx - 1) * 0.1, function()
             if not origin then return end
-
             local pos = origin + Vector(
                 math.Rand(-150, 150),
                 math.Rand(-150, 150),
                 math.Rand(  20, 100)
             )
-
-            -- Clamp to world bounds
             if not util.IsInWorld(pos) then pos = origin end
-
             local gib = ents.Create("prop_physics")
             if not IsValid(gib) then return end
-
             gib:SetModel(mdl)
             gib:SetPos(pos)
             gib:SetAngles(Angle(
@@ -469,35 +540,26 @@ function ENT:SpawnGibs(origin)
             gib:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
             gib:Spawn()
             gib:Activate()
-
             local phys = gib:GetPhysicsObject()
             if IsValid(phys) then
                 phys:SetMass(2000)
                 phys:SetDragCoefficient(0)
                 phys:SetAngleDragCoefficient(0)
                 phys:EnableGravity(true)
-                -- Outward explosion impulse
                 phys:ApplyForceCenter(Vector(
                     math.Rand(-400, 400),
                     math.Rand(-400, 400),
                     math.Rand( 300, 900)
                 ) * 2000)
-                -- Tumbling torque
                 phys:ApplyTorqueCenter(Vector(
                     math.Rand(-2000, 2000),
                     math.Rand(-2000, 2000),
                     math.Rand(-2000, 2000)
                 ))
             end
-
-            -- Ignite must be deferred by one tick after Activate()
             timer.Simple(0, function()
-                if IsValid(gib) then
-                    gib:Ignite(GIB_LIFETIME, 0)
-                end
+                if IsValid(gib) then gib:Ignite(GIB_LIFETIME, 0) end
             end)
-
-            -- Auto-remove after lifetime
             timer.Simple(GIB_LIFETIME, function()
                 if IsValid(gib) then gib:Remove() end
             end)
@@ -519,6 +581,16 @@ function ENT:Think()
         return true
     end
     local ct = CurTime()
+
+    -- Drive tumble every tick; skip all weapon logic while falling
+    if self.IsTumbling then
+        if not self.TumbleCrashed then
+            self:UpdateTumble(ct)
+        end
+        self:NextThink(ct + 0.015)
+        return true
+    end
+
     if ct >= self.DieTime then
         self:StopAllGunSounds()
         self:Remove()
@@ -543,36 +615,16 @@ end
 -- ============================================================
 
 function ENT:PhysicsUpdate(phys)
+    -- While tumbling, movement is driven manually in Think/UpdateTumble.
+    -- We must NOT touch bones here to avoid crashes after destruction.
+    if self.IsTumbling or self.IsDestroyed then return end
+
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
 
     local pos = self:GetPos()
     self.LastPos = pos
     local ft = engine.TickInterval()
-
-    -- ── TUMBLE PATH (ported from AN-71) ──────────────────────────────────────
-    if self.IsTumbling then
-        -- Integrate gravity into vertical velocity each tick
-        local gravZ = physenv.GetGravity().z * TUMBLE_GRAVITY_SCALE
-        self.TumbleVelocity.z = self.TumbleVelocity.z + gravZ * ft
-
-        local newPos = pos + self.TumbleVelocity * ft
-        if not util.IsInWorld(newPos) then newPos = pos end
-
-        -- Integrate angular velocity into angles
-        local curAng  = self:GetAngles()
-        local newAng  = Angle(
-            curAng.p + self.TumbleAngVelocity.x * ft,
-            curAng.y + self.TumbleAngVelocity.y * ft,
-            curAng.r + self.TumbleAngVelocity.z * ft
-        )
-
-        phys:SetPos(newPos)
-        phys:SetAngles(newAng)
-        phys:SetVelocity(self.TumbleVelocity)
-        return
-    end
-    -- ── NORMAL ORBIT PATH ────────────────────────────────────────────────────
 
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
@@ -595,6 +647,7 @@ function ENT:PhysicsUpdate(phys)
     local currentYaw  = self.ang.y
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
+    self.flightYaw    = currentYaw
 
     local targetRoll  = math.Clamp(rawYawDelta * -18, -15, 15)
     local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
