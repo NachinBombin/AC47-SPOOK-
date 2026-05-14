@@ -140,13 +140,12 @@ local GUN_BARREL_STEP = 35
 local CTRL_SMOOTH     = 10
 
 -- ============================================================
--- TUMBLE CONSTANTS  (matches Current-Ac-Model)
+-- TUMBLE CONSTANTS
 -- ============================================================
 
-local TUMBLE_GRAVITY   = 600   -- units/s^2 downward acceleration during tumble
-local GIB_LIFETIME     = 40   -- seconds before each gib is removed
+local TUMBLE_GRAVITY = 600
+local GIB_LIFETIME   = 40
 
--- Same gib models as before
 local GIB_MODELS = {
     "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
     "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
@@ -289,7 +288,6 @@ function ENT:Initialize()
     self.IsDestroyed = false
     self.DamageTier  = 0
 
-    -- Tumble state (exact match to Current-Ac-Model)
     self.IsTumbling        = false
     self.TumbleLastTime    = 0
     self.TumbleGroundZ     = ground
@@ -341,7 +339,7 @@ function ENT:StopAllGunSounds()
 end
 
 -- ============================================================
--- TUMBLE  (exact system from Current-Ac-Model)
+-- TUMBLE
 -- ============================================================
 
 function ENT:StartTumble()
@@ -349,16 +347,13 @@ function ENT:StartTumble()
     self.TumbleLastTime = CurTime()
     self.TumbleCrashed  = false
 
-    -- Refresh ground Z from current position
     local gnd = self:FindGround(self:GetPos())
     if gnd ~= -1 then self.TumbleGroundZ = gnd end
 
-    -- Inherit flight velocity + begin falling
     local fwd = Angle(0, self.flightYaw or self.ang.y, 0):Forward()
     local spd = self.Speed or 280
     self.TumbleVelocity = Vector(fwd.x * spd, fwd.y * spd, -80)
 
-    -- Random tumble spin
     local function sign() return (math.random(2) == 1) and 1 or -1 end
     self.TumbleAngVelocity = Vector(
         math.Rand(8,  18) * sign(),
@@ -366,7 +361,6 @@ function ENT:StartTumble()
         math.Rand(20, 40) * sign()
     )
 
-    -- Switch to MOVETYPE_NONE so we drive position manually
     self:SetMoveType(MOVETYPE_NONE)
     local phys = self:GetPhysicsObject()
     if IsValid(phys) then
@@ -376,7 +370,6 @@ function ENT:StartTumble()
         phys:Sleep()
     end
 
-    -- Initial hit effect
     local pos = self:GetPos()
     local ed  = EffectData()
     ed:SetOrigin(pos) ed:SetScale(4) ed:SetMagnitude(4) ed:SetRadius(400)
@@ -392,13 +385,11 @@ function ENT:UpdateTumble(ct)
     self.TumbleLastTime = ct
     if dt <= 0 or dt > 0.2 then return end
 
-    -- Apply gravity
     self.TumbleVelocity.z = self.TumbleVelocity.z - TUMBLE_GRAVITY * dt
 
     local pos    = self:GetPos()
     local newPos = pos + self.TumbleVelocity * dt
 
-    -- Integrate angular velocity
     local av = self.TumbleAngVelocity
     self.ang = Angle(
         self.ang.p + av.x * dt,
@@ -406,7 +397,6 @@ function ENT:UpdateTumble(ct)
         self.ang.r + av.z * dt
     )
 
-    -- Ground detection
     local hitGround = newPos.z <= (self.TumbleGroundZ or -16384) + 200
     local hitWall   = false
     if not hitGround then
@@ -415,7 +405,6 @@ function ENT:UpdateTumble(ct)
     end
 
     if hitGround or hitWall then
-        -- Set flag BEFORE calling CrashExplode so any re-entrant path is blocked
         self.TumbleCrashed = true
         self:CrashExplode()
         return
@@ -425,8 +414,70 @@ function ENT:UpdateTumble(ct)
     self:SetAngles(self.ang)
 end
 
+-- ============================================================
+-- GIB SPAWNER
+-- Staggered 0.1s apart to avoid bulk-spawn lag spike.
+-- phys:Wake() MUST be called before ApplyForceCenter or the
+-- physics object is asleep and all impulses are silently ignored.
+-- Ignite is deferred one tick (timer.Simple(0)) after Activate.
+-- ============================================================
+
+local function SpawnGibs(origin)
+    for idx, mdl in ipairs(GIB_MODELS) do
+        timer.Simple((idx - 1) * 0.1, function()
+            if not origin then return end
+            local pos = origin + Vector(
+                math.Rand(-150, 150),
+                math.Rand(-150, 150),
+                math.Rand(  20, 100)
+            )
+            if not util.IsInWorld(pos) then pos = origin end
+
+            local gib = ents.Create("prop_physics")
+            if not IsValid(gib) then return end
+
+            gib:SetModel(mdl)
+            gib:SetPos(pos)
+            gib:SetAngles(Angle(
+                math.Rand(0, 360),
+                math.Rand(0, 360),
+                math.Rand(0, 360)
+            ))
+            gib:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
+            gib:Spawn()
+            gib:Activate()
+
+            local phys = gib:GetPhysicsObject()
+            if IsValid(phys) then
+                phys:SetMass(2000)
+                phys:SetDragCoefficient(0)
+                phys:SetAngleDragCoefficient(0)
+                phys:EnableGravity(true)
+                phys:Wake()   -- REQUIRED: physics object spawns asleep; Wake() before any impulse
+                phys:ApplyForceCenter(Vector(
+                    math.Rand(-400, 400),
+                    math.Rand(-400, 400),
+                    math.Rand( 300, 900)
+                ) * 2000)
+                phys:ApplyTorqueCenter(Vector(
+                    math.Rand(-2000, 2000),
+                    math.Rand(-2000, 2000),
+                    math.Rand(-2000, 2000)
+                ))
+            end
+
+            timer.Simple(0, function()
+                if IsValid(gib) then gib:Ignite(GIB_LIFETIME, 0) end
+            end)
+
+            timer.Simple(GIB_LIFETIME, function()
+                if IsValid(gib) then gib:Remove() end
+            end)
+        end)
+    end
+end
+
 function ENT:CrashExplode()
-    -- Idempotency: only ever run once per entity lifetime
     if self._CrashFired then return end
     self._CrashFired   = true
     self.TumbleCrashed = true
@@ -453,9 +504,8 @@ function ENT:CrashExplode()
     end
 
     BigBlast(pos)
-    self:SpawnGibs(pos)
+    SpawnGibs(pos)
 
-    -- Cook-off blasts staggered like the AC-130
     local delays  = { 0.9, 1.9, 3.1 }
     local offsets = {
         Vector( 280,   0,   0),
@@ -479,7 +529,6 @@ function ENT:CrashExplode()
         end)
     end
 
-    -- Remove after last cook-off blast
     timer.Simple(3.5, function()
         local ent = Entity(entIdx)
         if IsValid(ent) and ent:GetClass() == "ent_ac47_spooky" then
@@ -496,11 +545,13 @@ function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
     self:StopAllGunSounds()
-    self:BroadcastDamageTier(3)
+    -- BroadcastDamageTier(0) MUST be called here, while the entity is still
+    -- alive, so the net message actually sends and the client stops engine/gun
+    -- sounds. Calling it from OnRemove is unreliable (entity already leaving).
+    self:BroadcastDamageTier(0)
     self:EmitSound("lfs/tfre_ac47/skytrain_engine_stop.wav", 125, 100, 1.0)
     self:StartTumble()
 
-    -- Safety-net: if plane never hits ground (spawned over void), force crash
     local entIdx = self:EntIndex()
     timer.Simple(20, function()
         local ent = Entity(entIdx)
@@ -515,63 +566,6 @@ function ENT:DestroyPlane()
 end
 
 -- ============================================================
--- GIB SPAWNER  (unchanged)
--- ============================================================
-
-function ENT:SpawnGibs(origin)
-    for idx, mdl in ipairs(GIB_MODELS) do
-        timer.Simple((idx - 1) * 0.1, function()
-            if not origin then return end
-            local pos = origin + Vector(
-                math.Rand(-150, 150),
-                math.Rand(-150, 150),
-                math.Rand(  20, 100)
-            )
-            if not util.IsInWorld(pos) then pos = origin end
-            local gib = ents.Create("prop_physics")
-            if not IsValid(gib) then return end
-            gib:SetModel(mdl)
-            gib:SetPos(pos)
-            gib:SetAngles(Angle(
-                math.Rand(0, 360),
-                math.Rand(0, 360),
-                math.Rand(0, 360)
-            ))
-            gib:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
-            gib:Spawn()
-            gib:Activate()
-            local phys = gib:GetPhysicsObject()
-            if IsValid(phys) then
-                phys:SetMass(2000)
-                phys:SetDragCoefficient(0)
-                phys:SetAngleDragCoefficient(0)
-                phys:EnableGravity(true)
-                phys:ApplyForceCenter(Vector(
-                    math.Rand(-400, 400),
-                    math.Rand(-400, 400),
-                    math.Rand( 300, 900)
-                ) * 2000)
-                phys:ApplyTorqueCenter(Vector(
-                    math.Rand(-2000, 2000),
-                    math.Rand(-2000, 2000),
-                    math.Rand(-2000, 2000)
-                ))
-            end
-            timer.Simple(0, function()
-                if IsValid(gib) then gib:Ignite(GIB_LIFETIME, 0) end
-            end)
-            timer.Simple(GIB_LIFETIME, function()
-                if IsValid(gib) then gib:Remove() end
-            end)
-        end)
-    end
-end
-
-function ENT:StopEngineSounds()
-    self:BroadcastDamageTier(0)
-end
-
--- ============================================================
 -- THINK
 -- ============================================================
 
@@ -582,7 +576,6 @@ function ENT:Think()
     end
     local ct = CurTime()
 
-    -- Drive tumble every tick; skip all weapon logic while falling
     if self.IsTumbling then
         if not self.TumbleCrashed then
             self:UpdateTumble(ct)
@@ -615,8 +608,6 @@ end
 -- ============================================================
 
 function ENT:PhysicsUpdate(phys)
-    -- While tumbling, movement is driven manually in Think/UpdateTumble.
-    -- We must NOT touch bones here to avoid crashes after destruction.
     if self.IsTumbling or self.IsDestroyed then return end
 
     if not self.DieTime or not self.sky then return end
@@ -786,7 +777,7 @@ function ENT:GetGunTargetPos(gunIdx)
     return basePos + offsetDir * offsetDist + (g and g.AimOffset or Vector(0,0,0))
 end
 
--- ─── BURST ───────────────────────────────────────────────────────────────────
+-- BURST
 
 function ENT:UpdateGunBurst(gunIdx, ct)
     local g = self.Guns[gunIdx]
@@ -847,7 +838,7 @@ function ENT:FireGunBullet(gunIdx, burst)
     ))
 end
 
--- ─── SPRAY ───────────────────────────────────────────────────────────────────
+-- SPRAY
 
 function ENT:UpdateGunSpray(gunIdx, ct)
     local g = self.Guns[gunIdx]
@@ -883,7 +874,7 @@ function ENT:UpdateGunSpray(gunIdx, ct)
     ))
 end
 
--- ─── LINE ────────────────────────────────────────────────────────────────────
+-- LINE
 
 function ENT:UpdateGunLine(gunIdx, ct)
     local g = self.Guns[gunIdx]
@@ -1011,6 +1002,5 @@ function ENT:FindGround(centerPos)
 end
 
 function ENT:OnRemove()
-    self:StopEngineSounds()
     self.pending_sounds = {}
 end
