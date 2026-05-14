@@ -140,21 +140,22 @@ local GUN_BARREL_STEP = 35
 local CTRL_SMOOTH     = 10
 
 -- ============================================================
--- TUMBLE / GIB CONSTANTS  (ported from AN-71)
+-- TUMBLE / GIB CONSTANTS
 -- ============================================================
 
 local TUMBLE_DURATION      = 12       -- seconds of tumble before crash explosion
 local TUMBLE_GRAVITY_SCALE = 1.0      -- multiplier applied to physenv gravity
 local GIB_LIFETIME         = 40       -- seconds before each gib is removed
+
+-- Same gib models as the AC-130 (b29 parts from the fonv pack)
 local GIB_MODELS = {
-    "models/xqm/jetbody2tailpiecelarge.mdl",
-    "models/xqm/jetbody2fuselagehuge.mdl",
-    "models/xqm/jetbody2fuselagelarge.mdl",
-    "models/xqm/jetwing2sizable.mdl",
-    "models/xqm/jetbody2wingrootblarge.mdl",
-    "models/xqm/jetbody2wingrootblarge.mdl",
-    "models/xqm/jetenginehuge.mdl",
-    "models/xqm/jetenginehuge.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partnose.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partprop.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partprop.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partprop.mdl",
+    "models/fonv/vehicles/b29/parts/b29_parttube.mdl",
 }
 
 -- ============================================================
@@ -434,7 +435,10 @@ function ENT:CrashExplode()
 end
 
 -- ============================================================
--- GIB SPAWNER  (ported from AN-71)
+-- GIB SPAWNER
+-- Each gib is staggered 0.1s apart to avoid a bulk-spawn lag spike.
+-- Ignite is deferred one tick (timer.Simple(0)) after Activate so
+-- the entity fire system is fully ready -- this is the reliable pattern.
 -- ============================================================
 
 function ENT:SpawnGibs(origin)
