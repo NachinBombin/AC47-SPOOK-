@@ -29,7 +29,7 @@ util.AddNetworkString("ac47_gun_sound")
 util.AddNetworkString("ac47_muzzle_flash")
 
 -- ============================================================
--- SPATIAL SOUND SYSTEM  (engine sounds only)
+-- SPATIAL SOUND SYSTEM
 -- ============================================================
 
 local SOUND_SPEED     = 8200
@@ -93,13 +93,10 @@ end
 
 -- ============================================================
 -- GUN SOUND BROADCAST
--- Sends start/stop signals per gun index to the client.
--- The client owns 3 CreateSound handles (one per gun wav).
--- We only send this when the state actually changes.
 -- ============================================================
 
 function ENT:BroadcastGunSound(gunIdx, isStart)
-    if self.GunFiring[gunIdx] == isStart then return end  -- no change, skip
+    if self.GunFiring[gunIdx] == isStart then return end
     self.GunFiring[gunIdx] = isStart
     net.Start("ac47_gun_sound")
         net.WriteUInt(self:EntIndex(), 16)
@@ -141,6 +138,24 @@ local LINE_DELAY          = 0.025
 
 local GUN_BARREL_STEP = 35
 local CTRL_SMOOTH     = 10
+
+-- ============================================================
+-- TUMBLE / GIB CONSTANTS  (ported from AN-71)
+-- ============================================================
+
+local TUMBLE_DURATION      = 12       -- seconds of tumble before crash explosion
+local TUMBLE_GRAVITY_SCALE = 1.0      -- multiplier applied to physenv gravity
+local GIB_LIFETIME         = 40       -- seconds before each gib is removed
+local GIB_MODELS = {
+    "models/xqm/jetbody2tailpiecelarge.mdl",
+    "models/xqm/jetbody2fuselagehuge.mdl",
+    "models/xqm/jetbody2fuselagelarge.mdl",
+    "models/xqm/jetwing2sizable.mdl",
+    "models/xqm/jetbody2wingrootblarge.mdl",
+    "models/xqm/jetbody2wingrootblarge.mdl",
+    "models/xqm/jetenginehuge.mdl",
+    "models/xqm/jetenginehuge.mdl",
+}
 
 -- ============================================================
 -- ENT PROPERTIES
@@ -241,7 +256,6 @@ function ENT:Initialize()
 
     self.PropAngle     = 0
     self.GunBarrelStep = { 0, 0, 0 }
-    -- GunFiring tracks the LAST broadcast state so we never double-send
     self.GunFiring     = { false, false, false }
 
     self.Guns = {}
@@ -270,8 +284,13 @@ function ENT:Initialize()
         }
     end
 
-    self.IsDestroyed = false
-    self.DamageTier  = 0
+    self.IsDestroyed    = false
+    self.DamageTier     = 0
+    -- Tumble state (ported from AN-71)
+    self.IsTumbling        = false
+    self.TumbleVelocity    = Vector(0, 0, 0)
+    self.TumbleAngVelocity = Vector(0, 0, 0)
+    self._CrashFired       = false
 
     self:Debug("Spawned at " .. tostring(spawnPos))
 end
@@ -315,12 +334,76 @@ function ENT:StopAllGunSounds()
     end
 end
 
+-- ============================================================
+-- DESTROY → TUMBLE → CRASH  (ported from AN-71)
+-- ============================================================
+
 function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
     self:StopAllGunSounds()
-    self:BroadcastDamageTier(0)
+    self:BroadcastDamageTier(3)   -- tier 3 = destroyed, drives heavy smoke on client
+    self:EmitSound("lfs/tfre_ac47/skytrain_engine_stop.wav", 125, 100, 1.0)
+    self:StartTumble()
+
+    -- Safety-net timer: if CrashExplode hasn't fired yet, call it.
+    -- Guards against entity-slot recycling by checking class.
+    local entIdx = self:EntIndex()
+    timer.Simple(TUMBLE_DURATION + 5, function()
+        local ent = Entity(entIdx)
+        if IsValid(ent)
+            and not ent:IsMarkedForDeletion()
+            and ent:GetClass() == "ent_ac47_spooky"
+            and not ent._CrashFired
+        then
+            ent:CrashExplode()
+        end
+    end)
+end
+
+function ENT:StartTumble()
+    self.IsTumbling = true
+
+    -- Inherit current forward velocity and begin falling
+    local fwd = self:GetAngles():Forward()
+    self.TumbleVelocity = fwd * self.Speed
+    self.TumbleVelocity.z = -200
+
+    -- Random spin rates (degrees/s) matching AN-71 ranges
+    self.TumbleAngVelocity = Vector(
+        math.Rand(-300, 300),   -- pitch spin
+        math.Rand(150, 400),    -- yaw spin
+        math.Rand(-250, 250)    -- roll spin
+    )
+
+    -- Immediate impact effect at current position
     local pos = self.LastPos or self:GetPos()
+    local ed = EffectData()
+    ed:SetOrigin(pos) ed:SetScale(5) ed:SetMagnitude(5) ed:SetRadius(500)
+    util.Effect("500lb_air", ed, true, true)
+    sound.Play("ambient/explosions/explode_8.wav", pos, 140, 90, 1.0)
+
+    -- Schedule the ground crash
+    local entIdx = self:EntIndex()
+    timer.Simple(TUMBLE_DURATION, function()
+        local ent = Entity(entIdx)
+        if IsValid(ent)
+            and not ent:IsMarkedForDeletion()
+            and ent:GetClass() == "ent_ac47_spooky"
+            and not ent._CrashFired
+        then
+            ent:CrashExplode()
+        end
+    end)
+end
+
+function ENT:CrashExplode()
+    if self._CrashFired then return end
+    self._CrashFired = true
+
+    local pos = self.LastPos or self:GetPos()
+
+    -- Multi-layer explosion VFX
     local function boom(p, sc)
         local ed = EffectData()
         ed:SetOrigin(p) ed:SetScale(sc) ed:SetMagnitude(sc) ed:SetRadius(sc * 100)
@@ -329,14 +412,93 @@ function ENT:DestroyPlane()
         ed2:SetOrigin(p) ed2:SetScale(sc) ed2:SetMagnitude(sc) ed2:SetRadius(sc * 100)
         util.Effect("500lb_air", ed2, true, true)
     end
-    boom(pos, 6)
-    boom(pos + Vector(0,0,80),  4)
-    boom(pos + Vector(0,0,160), 3)
-    sound.Play("ambient/explosions/explode_8.wav", pos, 140, 90, 1.0)
-    sound.Play("weapon_AWP.Single",               pos, 145, 60, 1.0)
-    self:EmitSound("lfs/tfre_ac47/skytrain_engine_stop.wav", 125, 100, 1.0)
-    util.BlastDamage(self, self, pos, 350, 180)
-    self:Remove()
+    boom(pos, 8)
+    boom(pos + Vector(0, 0,  80), 5)
+    boom(pos + Vector(0, 0, 160), 4)
+    boom(pos + Vector(0, 0, 260), 3)
+
+    sound.Play("ambient/explosions/explode_8.wav", pos, 145, 80,  1.0)
+    sound.Play("weapon_AWP.Single",               pos, 148, 55,  1.0)
+    util.BlastDamage(self, self, pos, 450, 220)
+
+    self:SpawnGibs(pos)
+
+    -- Small delay before removing the main hull so gibs have a frame to appear
+    local entIdx = self:EntIndex()
+    timer.Simple(0.1, function()
+        local ent = Entity(entIdx)
+        if IsValid(ent) and ent:GetClass() == "ent_ac47_spooky" then
+            ent:Remove()
+        end
+    end)
+end
+
+-- ============================================================
+-- GIB SPAWNER  (ported from AN-71)
+-- ============================================================
+
+function ENT:SpawnGibs(origin)
+    for idx, mdl in ipairs(GIB_MODELS) do
+        -- Stagger each gib by 0.1 s to avoid a single-frame physics spike
+        timer.Simple((idx - 1) * 0.1, function()
+            if not origin then return end
+
+            local pos = origin + Vector(
+                math.Rand(-150, 150),
+                math.Rand(-150, 150),
+                math.Rand(  20, 100)
+            )
+
+            -- Clamp to world bounds
+            if not util.IsInWorld(pos) then pos = origin end
+
+            local gib = ents.Create("prop_physics")
+            if not IsValid(gib) then return end
+
+            gib:SetModel(mdl)
+            gib:SetPos(pos)
+            gib:SetAngles(Angle(
+                math.Rand(0, 360),
+                math.Rand(0, 360),
+                math.Rand(0, 360)
+            ))
+            gib:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
+            gib:Spawn()
+            gib:Activate()
+
+            local phys = gib:GetPhysicsObject()
+            if IsValid(phys) then
+                phys:SetMass(2000)
+                phys:SetDragCoefficient(0)
+                phys:SetAngleDragCoefficient(0)
+                phys:EnableGravity(true)
+                -- Outward explosion impulse
+                phys:ApplyForceCenter(Vector(
+                    math.Rand(-400, 400),
+                    math.Rand(-400, 400),
+                    math.Rand( 300, 900)
+                ) * 2000)
+                -- Tumbling torque
+                phys:ApplyTorqueCenter(Vector(
+                    math.Rand(-2000, 2000),
+                    math.Rand(-2000, 2000),
+                    math.Rand(-2000, 2000)
+                ))
+            end
+
+            -- Ignite must be deferred by one tick after Activate()
+            timer.Simple(0, function()
+                if IsValid(gib) then
+                    gib:Ignite(GIB_LIFETIME, 0)
+                end
+            end)
+
+            -- Auto-remove after lifetime
+            timer.Simple(GIB_LIFETIME, function()
+                if IsValid(gib) then gib:Remove() end
+            end)
+        end)
+    end
 end
 
 function ENT:StopEngineSounds()
@@ -362,7 +524,7 @@ function ENT:Think()
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
     self:FlushPendingSounds()
 
-    if self.Guns then
+    if self.Guns and not self.IsDestroyed then
         for i = 1, 3 do
             self:HandleGunWindow(i, ct)
         end
@@ -379,9 +541,34 @@ end
 function ENT:PhysicsUpdate(phys)
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
+
     local pos = self:GetPos()
     self.LastPos = pos
     local ft = engine.TickInterval()
+
+    -- ── TUMBLE PATH (ported from AN-71) ──────────────────────────────────────
+    if self.IsTumbling then
+        -- Integrate gravity into vertical velocity each tick
+        local gravZ = physenv.GetGravity().z * TUMBLE_GRAVITY_SCALE
+        self.TumbleVelocity.z = self.TumbleVelocity.z + gravZ * ft
+
+        local newPos = pos + self.TumbleVelocity * ft
+        if not util.IsInWorld(newPos) then newPos = pos end
+
+        -- Integrate angular velocity into angles
+        local curAng  = self:GetAngles()
+        local newAng  = Angle(
+            curAng.p + self.TumbleAngVelocity.x * ft,
+            curAng.y + self.TumbleAngVelocity.y * ft,
+            curAng.r + self.TumbleAngVelocity.z * ft
+        )
+
+        phys:SetPos(newPos)
+        phys:SetAngles(newAng)
+        phys:SetVelocity(self.TumbleVelocity)
+        return
+    end
+    -- ── NORMAL ORBIT PATH ────────────────────────────────────────────────────
 
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
@@ -573,7 +760,6 @@ function ENT:UpdateGunBurst(gunIdx, ct)
             anyActive = true
         end
     end
-    -- Sound follows actual burst activity
     self:BroadcastGunSound(gunIdx, anyActive)
 end
 
