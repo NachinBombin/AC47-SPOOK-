@@ -140,6 +140,26 @@ local GUN_BARREL_STEP = 35
 local CTRL_SMOOTH     = 10
 
 -- ============================================================
+-- OBSTACLE EVASION CONSTANTS  (ported from AC-130)
+-- POSITIVE yaw = left for this model family (inverted-forward axis).
+-- ============================================================
+local PROBE_FORWARD  = 3200
+local PROBE_DIAG     = 2400
+local PROBE_SIDE     = 1600
+local PROBE_UP       = 900
+local PROBE_DOWN     = 700
+local YAW_NUDGE      = 0.9
+local PITCH_NUDGE    = 0.12
+local EVASION_BLEND  = 0.12
+local CLEAR_TIME     = 2.5
+local PROBE_MASK     = MASK_SOLID_BRUSHONLY
+
+-- Normal orbit turn rate (deg/tick).
+-- POSITIVE = left for this model (same quirk as air_130_l.mdl).
+local ORBIT_YAW_RATE = 0.1
+local SKY_YAW_RATE   = 0.3
+
+-- ============================================================
 -- TUMBLE CONSTANTS
 -- ============================================================
 
@@ -222,11 +242,12 @@ function ENT:Initialize()
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
 
-    local ang = self.CallDir:Angle()
-    self:SetAngles(Angle(0, ang.y - 90, 0))
+    local ang      = self.CallDir:Angle()
+    local initYaw  = math.NormalizeAngle(ang.y - 90)
+    self:SetAngles(Angle(0, initYaw, 0))
     self.ang = self:GetAngles()
 
-    self.flightYaw = ang.y - 90
+    self.flightYaw = initYaw
 
     self.AltDriftCurrent  = self.sky
     self.AltDriftTarget   = self.sky
@@ -239,16 +260,24 @@ function ENT:Initialize()
     self.SmoothedRoll    = 0
     self.SmoothedPitch   = 0
     self.SmoothedYaw     = 0
-    self.PrevYaw         = self:GetAngles().y
+    self.PrevYaw         = initYaw
 
     self.ctrlSmPitch = 0
     self.ctrlSmYaw   = 0
     self.ctrlSmRoll  = 0
 
+    -- Evasion state
+    self.IsEvading     = false
+    self.EvasionYaw    = initYaw
+    self.EvasionPitch  = 0
+    self.EvasionClearT = 0
+
     self.PhysObj = self:GetPhysicsObject()
     if IsValid(self.PhysObj) then
         self.PhysObj:Wake()
         self.PhysObj:EnableGravity(false)
+        self.PhysObj:SetMass(1e8)
+        self.PhysObj:SetDamping(1, 1)
     end
 
     self:EmitSpatialSound("lfs/tfre_ac47/skytrain_engine_4rpm.wav", self:GetPos(), 155, 100, 1.0)
@@ -297,6 +326,92 @@ function ENT:Initialize()
     self.TumbleAngVelocity = Vector(0, 0, 0)
 
     self:Debug("Spawned at " .. tostring(spawnPos))
+end
+
+-- ============================================================
+-- OBSTACLE EVASION  (full AC-130 system)
+-- ============================================================
+
+function ENT:RunObstacleProbes()
+    local pos    = self:GetPos()
+    local yawAng = Angle(0, self.ang.y, 0)
+    local fwd    = yawAng:Forward()
+    local right  = yawAng:Right()
+    local up     = Vector(0, 0, 1)
+
+    local fwdL = (fwd - right):GetNormalized()
+    local fwdR = (fwd + right):GetNormalized()
+
+    local probes = {
+        { pos + fwd   * PROBE_FORWARD, "forward"   },
+        { pos + fwdL  * PROBE_DIAG,    "fwd-left"  },
+        { pos + fwdR  * PROBE_DIAG,    "fwd-right" },
+        { pos - right * PROBE_SIDE,    "left"      },
+        { pos + right * PROBE_SIDE,    "right"     },
+        { pos + up    * PROBE_UP,      "up"        },
+        { pos - up    * PROBE_DOWN,    "down"      },
+    }
+
+    local hitUp   = false
+    local hitDown = false
+    local anyHit  = false
+
+    for _, probe in ipairs(probes) do
+        local tr = util.TraceLine({
+            start  = pos,
+            endpos = probe[1],
+            filter = self,
+            mask   = PROBE_MASK,
+        })
+        if tr.Hit then
+            anyHit = true
+            if probe[2] == "up"   then hitUp   = true end
+            if probe[2] == "down" then hitDown  = true end
+        end
+    end
+
+    return anyHit, hitUp, hitDown
+end
+
+function ENT:UpdateEvasion()
+    if self.IsTumbling or self.IsDestroyed then return 0 end
+
+    local anyHit, hitUp, hitDown = self:RunObstacleProbes()
+    local ct = CurTime()
+
+    if anyHit then
+        self.EvasionClearT = 0
+
+        if not self.IsEvading then
+            self.EvasionYaw   = math.NormalizeAngle(self.ang.y)
+            self.IsEvading    = true
+            self.EvasionPitch = 0
+            self:Debug("Evasion started")
+        end
+
+        -- Positive yaw = left for this model family (same as AC-130).
+        self.EvasionYaw = math.NormalizeAngle(self.EvasionYaw + YAW_NUDGE)
+
+        if hitDown and not hitUp then
+            self.EvasionPitch = self.EvasionPitch - PITCH_NUDGE
+        elseif hitUp and not hitDown then
+            self.EvasionPitch = self.EvasionPitch + PITCH_NUDGE
+        end
+        self.EvasionPitch = math.Clamp(self.EvasionPitch, -6, 6)
+    else
+        if self.IsEvading then
+            if self.EvasionClearT == 0 then
+                self.EvasionClearT = ct
+            elseif ct - self.EvasionClearT >= CLEAR_TIME then
+                self.IsEvading     = false
+                self.EvasionClearT = 0
+                self.EvasionPitch  = 0
+                self:Debug("Evasion cleared")
+            end
+        end
+    end
+
+    return self.EvasionPitch
 end
 
 -- ============================================================
@@ -416,10 +531,6 @@ end
 
 -- ============================================================
 -- GIB SPAWNER
--- Staggered 0.1s apart to avoid bulk-spawn lag spike.
--- phys:Wake() MUST be called before ApplyForceCenter or the
--- physics object is asleep and all impulses are silently ignored.
--- Ignite is deferred one tick (timer.Simple(0)) after Activate.
 -- ============================================================
 
 local function SpawnGibs(origin)
@@ -453,7 +564,7 @@ local function SpawnGibs(origin)
                 phys:SetDragCoefficient(0)
                 phys:SetAngleDragCoefficient(0)
                 phys:EnableGravity(true)
-                phys:Wake()   -- REQUIRED: physics object spawns asleep; Wake() before any impulse
+                phys:Wake()
                 phys:ApplyForceCenter(Vector(
                     math.Rand(-400, 400),
                     math.Rand(-400, 400),
@@ -545,9 +656,6 @@ function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
     self:StopAllGunSounds()
-    -- BroadcastDamageTier(0) MUST be called here, while the entity is still
-    -- alive, so the net message actually sends and the client stops engine/gun
-    -- sounds. Calling it from OnRemove is unreliable (entity already leaving).
     self:BroadcastDamageTier(0)
     self:EmitSound("lfs/tfre_ac47/skytrain_engine_stop.wav", 125, 100, 1.0)
     self:StartTumble()
@@ -608,7 +716,11 @@ end
 -- ============================================================
 
 function ENT:PhysicsUpdate(phys)
-    if self.IsTumbling or self.IsDestroyed then return end
+    if self.IsTumbling or self.IsDestroyed then
+        phys:SetVelocity(Vector(0, 0, 0))
+        phys:SetAngleVelocity(Vector(0, 0, 0))
+        return
+    end
 
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
@@ -617,6 +729,7 @@ function ENT:PhysicsUpdate(phys)
     self.LastPos = pos
     local ft = engine.TickInterval()
 
+    -- Altitude drift
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
@@ -625,16 +738,30 @@ function ENT:PhysicsUpdate(phys)
     self.JitterPhase     = self.JitterPhase + 0.02
     local liveAlt = self.AltDriftCurrent + math.sin(self.JitterPhase) * self.JitterAmplitude
 
-    local flatDist = Vector(pos.x - self.CenterPos.x, pos.y - self.CenterPos.y, 0):Length()
-    local orbitYaw = 0
-    if flatDist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
-        orbitYaw       = 0.1
-        self.TurnDelay = CurTime() + 0.02
-    end
-    local trSky = util.QuickTrace(pos, self:GetForward() * 3000, self)
-    local skyYaw = trSky.HitSky and 0.3 or 0
+    -- Evasion / orbit yaw
+    local evasionPitchCorrection = self:UpdateEvasion()
 
-    self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
+    if self.IsEvading then
+        local delta = math.NormalizeAngle(self.EvasionYaw - self.ang.y)
+        self.ang = self.ang + Angle(0, delta * EVASION_BLEND, 0)
+    else
+        local orbitYaw   = ORBIT_YAW_RATE
+        local flatPos    = Vector(pos.x, pos.y, 0)
+        local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
+        local dist       = flatPos:Distance(flatCenter)
+        if dist > self.OrbitRadius * 1.15 then
+            orbitYaw = orbitYaw + 0.05
+        end
+
+        local skyYaw = 0
+        local trSky  = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
+        if trSky.HitSky then skyYaw = SKY_YAW_RATE end
+
+        self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
+    end
+
+    self.ang = Angle(self.ang.p, math.NormalizeAngle(self.ang.y), self.ang.r)
+
     local currentYaw  = self.ang.y
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
@@ -642,20 +769,42 @@ function ENT:PhysicsUpdate(phys)
 
     local targetRoll  = math.Clamp(rawYawDelta * -18, -15, 15)
     local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
-    self.SmoothedRoll  = Lerp(rollLerp, self.SmoothedRoll,  targetRoll)
-    local forward     = self.ang:Forward()
-    local vel         = forward * self.Speed
-    self.SmoothedPitch = Lerp(0.03, self.SmoothedPitch, math.Clamp(-vel.z * 0.02, -8, 8))
+    self.SmoothedRoll  = Lerp(rollLerp, self.SmoothedRoll, targetRoll)
+
+    local forward = self.ang:Forward()
+    local vel     = forward * self.Speed
+
+    local evadePitchRad = math.rad(evasionPitchCorrection or 0)
+    local vertCorrect   = math.sin(evadePitchRad) * self.Speed
+
+    local targetPitch  = math.Clamp(-vel.z * 0.02 + (evasionPitchCorrection or 0) * 0.5, -8, 8)
+    self.SmoothedPitch = Lerp(0.03, self.SmoothedPitch, targetPitch)
 
     local finalAng = Angle(self.SmoothedPitch, self.ang.y, self.SmoothedRoll)
     phys:SetAngles(finalAng)
-    phys:SetPos(Vector(
+
+    local newPos = Vector(
         pos.x + vel.x * ft,
         pos.y + vel.y * ft,
-        liveAlt
-    ))
+        liveAlt + vertCorrect * ft
+    )
+
+    if not util.IsInWorld(newPos) then
+        self:Debug("Position guard: out-of-world move discarded")
+        if not self.IsEvading then
+            self.EvasionYaw   = math.NormalizeAngle(self.ang.y)
+            self.IsEvading    = true
+            self.EvasionPitch = 0
+        end
+        self.EvasionYaw = math.NormalizeAngle(self.EvasionYaw + YAW_NUDGE * 4)
+        phys:SetPos(pos)
+        return
+    end
+
+    phys:SetPos(newPos)
     phys:SetVelocity(vel)
 
+    -- Prop & control surface bone animation
     local propDegsPerTick = 36000 * ft
     self.PropAngle = (self.PropAngle + propDegsPerTick) % 360
     local propAng  = Angle(self.PropAngle, 0, 0)
